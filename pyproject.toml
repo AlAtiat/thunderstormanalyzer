@@ -3,7 +3,7 @@
 project_name = "ThunderSTORMAnalyzer"
 bundle = "com.thunderstormanalyzer"
 version = "0.0.1"
-url = "https://thunderstormanalyzer.com/thunderstormanalyzer"
+url = "https://github.com/AlAtiat/thunderstormanalyzer"
 license.file = "LICENSE"
 author = "Aun Al Atiat"
 author_email = "aun@alatiat.com"

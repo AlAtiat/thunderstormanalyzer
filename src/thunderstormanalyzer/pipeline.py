@@ -268,17 +268,39 @@ def _count_on_off_cycles(frames: np.ndarray, gap_threshold: int = 2) -> int:
     return int(np.sum(gaps > gap_threshold)) + 1
 
 
+def _fourier_periodicity(frames: np.ndarray, total_frames: int) -> float:
+    """Return dominant-frequency power fraction [0, 1]. Higher = more periodic blinking."""
+    if len(frames) < 8 or total_frames < 8:
+        return 0.0
+    signal = np.zeros(total_frames)
+    for f in frames:
+        idx = int(f)
+        if 0 <= idx < total_frames:
+            signal[idx] = 1.0
+    fft_mag = np.abs(np.fft.rfft(signal))
+    fft_mag[0] = 0.0  # remove DC component
+    total_power = fft_mag.sum()
+    if total_power < 1e-9:
+        return 0.0
+    return float(fft_mag.max() / total_power)
+
+
 def _score_cluster(spot_df: pd.DataFrame, frame_col: str = "frame",
-                   intensity_col: str = "intensity") -> float:
+                   intensity_col: str = "intensity",
+                   frame_min: int = 0, frame_max: int = 1000,
+                   min_cycles: int = 2, min_frames: int = 5,
+                   gap_threshold: int = 2) -> float:
     frames = spot_df[frame_col].values
     n_unique_frames = len(np.unique(frames))
-    n_cycles = _count_on_off_cycles(frames)
-    if n_cycles < 2 or n_unique_frames < 5:
+    n_cycles = _count_on_off_cycles(frames, gap_threshold=gap_threshold)
+    if n_cycles < min_cycles or n_unique_frames < min_frames:
         return 0.0
     per_frame_intensity = spot_df.groupby(frame_col)[intensity_col].mean()
     cv = per_frame_intensity.std() / (per_frame_intensity.mean() + 1e-9)
     consistency = 1.0 / (cv + 1e-6)
-    return float(n_cycles * n_unique_frames * consistency)
+    total_frames = max(frame_max - frame_min + 1, 1)
+    periodicity = _fourier_periodicity(frames - frame_min, total_frames)
+    return float(n_cycles * n_unique_frames * consistency * (1.0 + periodicity))
 
 
 def _are_collinear(cx: list[float], cy: list[float],
@@ -320,6 +342,11 @@ def _find_all_blinking_triplets(
     frame_col: str = "frame",
     intensity_col: str = "intensity",
     max_triplets: int = 10,
+    min_blink_cycles: int = 2,
+    min_blink_frames: int = 5,
+    blink_gap_frames: int = 2,
+    dbscan_min_samples: int = 3,
+    collinear_angle_deg: float = 30.0,
     log_fn: LogFn | None = None,
 ) -> tuple[list[list[dict]], str]:
     """Detect all valid collinear triplets of blinking clusters.
@@ -349,13 +376,13 @@ def _find_all_blinking_triplets(
     xy_only = df_3sigma[[x_col, y_col]].copy()
     locs_for_cluster = lc.LocData.from_dataframe(dataframe=xy_only)
     noise_locs, cluster_collection = lc.cluster_dbscan(
-        locs_for_cluster, eps=spot_eps, min_samples=3
+        locs_for_cluster, eps=spot_eps, min_samples=dbscan_min_samples
     )
     refs = cluster_collection.references if cluster_collection.references else []
     n_dbscan_clusters = len(refs)
     n_noise = len(noise_locs) if noise_locs else 0
     _log(f"  [INFO] locan DBSCAN: {n_dbscan_clusters} clusters, {n_noise} noise pts "
-         f"(eps={spot_eps:.1f} nm, min_samples=3)")
+         f"(eps={spot_eps:.1f} nm, min_samples={dbscan_min_samples})")
 
     # --- Candidate collection ---
     # ref.data has only x/y (we passed xy_only to locan), so look up full rows
@@ -363,6 +390,8 @@ def _find_all_blinking_triplets(
     max_spread_nm = spot_eps * 1.5
     candidates: list[dict] = []
     n_rejected_diffuse = 0
+    _frame_min = int(df_3sigma[frame_col].min())
+    _frame_max = int(df_3sigma[frame_col].max())
 
     for ref in refs:
         # locdata_id is the original row index into df_3sigma (preserved by locan)
@@ -389,7 +418,10 @@ def _find_all_blinking_triplets(
             cluster_unc = rms_spread
         vis_radius = max(cluster_unc * 2.0, 15.0)
 
-        sc = _score_cluster(spot_df, frame_col=frame_col, intensity_col=intensity_col)
+        sc = _score_cluster(spot_df, frame_col=frame_col, intensity_col=intensity_col,
+                            frame_min=_frame_min, frame_max=_frame_max,
+                            min_cycles=min_blink_cycles, min_frames=min_blink_frames,
+                            gap_threshold=blink_gap_frames)
         candidates.append({
             "label": int(id(ref)),
             "score": sc,
@@ -486,11 +518,17 @@ def _find_all_blinking_triplets(
                 n_collinear_checked += 1
                 cx_pts = [ax_, ox, scored_candidates[k]["cx"]]
                 cy_pts = [ay_, oy, scored_candidates[k]["cy"]]
-                if not _are_collinear(cx_pts, cy_pts):
+                if not _are_collinear(cx_pts, cy_pts, angle_tol_deg=collinear_angle_deg):
                     continue
                 seen_triplet_sets.add(key)
                 triplet_raw = [scored_candidates[anchor_idx], scored_candidates[other_idx], scored_candidates[k]]
-                triplet_score = sum(s["score"] for s in triplet_raw)
+                # Score by the WEAKEST spot — a triplet with one near-silent dye must lose
+                _cycles = [_count_on_off_cycles(s["df"][frame_col].values, gap_threshold=blink_gap_frames) for s in triplet_raw]
+                _min_cycles = min(_cycles)
+                _mean_cycles = float(np.mean(_cycles))
+                _quality_sum = sum(s["score"] for s in triplet_raw)
+                # min²×mean dominates: [88,37,2]→169 vs [20,18,15]→3982 — balanced wins
+                triplet_score = float(_min_cycles ** 2 * _mean_cycles * _quality_sum)
                 all_triplets.append((triplet_score, triplet_raw))
 
     _log(f"  [INFO] Collinear candidates checked: {n_collinear_checked}  "
@@ -563,6 +601,7 @@ def _write_interactive_viewer(
     dataset_name: str,
     frame_col: str = "frame",
     intensity_col: str = "intensity",
+    render_bin_size_nm: int = 20,
     log_fn: LogFn | None = None,
 ) -> Path | None:
     """Render one PNG per triplet, then bundle them into a self-contained HTML carousel.
@@ -613,7 +652,7 @@ def _write_interactive_viewer(
 
             # Full super-res image (left panel) — no circles
             ax_main.set_facecolor("black")
-            lc.render_2d(locs_3sigma_for_render, bin_size=20,
+            lc.render_2d(locs_3sigma_for_render, bin_size=render_bin_size_nm,
                          rescale=lc.Trafo.EQUALIZE,
                          cmap="cet_fire", cbar=False, ax=ax_main)
             ax_main.set_title(f"{dataset_name} — origami triplet {t_idx + 1}",
@@ -650,7 +689,7 @@ def _write_interactive_viewer(
 
             # Zoom panel with coloured circles on spots
             ax_zoom.set_facecolor("black")
-            lc.render_2d(locs_3sigma_for_render, bin_size=20,
+            lc.render_2d(locs_3sigma_for_render, bin_size=render_bin_size_nm,
                          rescale=lc.Trafo.EQUALIZE,
                          cmap="cet_fire", cbar=False, ax=ax_zoom)
             ax_zoom.set_xlim(bx0, bx1)
@@ -785,7 +824,8 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
                              df_3sigma: pd.DataFrame,
                              out_dir: Path, dataset_name: str,
                              frame_col: str = "frame",
-                             intensity_col: str = "intensity") -> None:
+                             intensity_col: str = "intensity",
+                             render_bin_size_nm: int = 20) -> None:
     import matplotlib.patches as mpatches
     import matplotlib.gridspec as gridspec
 
@@ -815,7 +855,7 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
 
     Trafo = lc.Trafo
     ax_main.set_facecolor("black")
-    lc.render_2d(locs_3sigma, bin_size=20, rescale=Trafo.EQUALIZE,
+    lc.render_2d(locs_3sigma, bin_size=render_bin_size_nm, rescale=Trafo.EQUALIZE,
                  cmap="cet_fire", cbar=False, ax=ax_main)
     ax_main.set_title(f"{dataset_name} — DNA origami triplet",
                       color="white", fontsize=11, pad=6)
@@ -847,7 +887,7 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
         fig.add_artist(con)
 
     ax_zoom.set_facecolor("black")
-    lc.render_2d(locs_3sigma, bin_size=20, rescale=Trafo.EQUALIZE,
+    lc.render_2d(locs_3sigma, bin_size=render_bin_size_nm, rescale=Trafo.EQUALIZE,
                  cmap="cet_fire", cbar=False, ax=ax_zoom)
     ax_zoom.set_xlim(bx0, bx1)
     ax_zoom.set_ylim(by0, by1)
@@ -1231,6 +1271,11 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
                 x_col=c.x_col, y_col=c.y_col,
                 frame_col=c.frame_col, intensity_col=c.intensity_col,
                 max_triplets=qc.max_triplets,
+                min_blink_cycles=qc.min_blink_cycles,
+                min_blink_frames=qc.min_blink_frames,
+                blink_gap_frames=qc.blink_gap_frames,
+                dbscan_min_samples=qc.dbscan_min_samples,
+                collinear_angle_deg=qc.collinear_angle_deg,
                 log_fn=log_fn,
             )
             blinking_spots_found = len(all_triplets)
@@ -1240,10 +1285,12 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
                 _plot_blinking_showcase(lc, locs_3sigma, top_triplet, df_3sigma,
                                         out_dir, entry.name,
                                         frame_col=c.frame_col,
-                                        intensity_col=c.intensity_col)
+                                        intensity_col=c.intensity_col,
+                                        render_bin_size_nm=qc.render_bin_size_nm)
                 viewer_html = _write_interactive_viewer(
                     all_triplets, df_3sigma, out_dir, entry.name,
                     frame_col=c.frame_col, intensity_col=c.intensity_col,
+                    render_bin_size_nm=qc.render_bin_size_nm,
                     log_fn=log_fn,
                 )
                 stats["viewer_html_path"] = str(viewer_html) if viewer_html else None

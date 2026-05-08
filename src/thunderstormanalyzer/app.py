@@ -144,10 +144,11 @@ class DatasetRow(toga.Box):
     def _update_pixel_size_label(self, widget=None) -> None:
         try:
             nm = float(self.qc_camera_px.value) / float(self.qc_magnification.value)
-            self.effective_px_label.text = f"Effective pixel size: {nm:.2f} nm/px"
-            self.qc_pixel_size.value = f"{nm:.2f}"
         except (ValueError, ZeroDivisionError):
             self.effective_px_label.text = "Effective pixel size: — nm/px"
+            return
+        self.qc_pixel_size.value = f"{nm:.2f}"
+        self.effective_px_label.text = f"Effective pixel size: {nm:.2f} nm/px"
 
     # ── File browsers ─────────────────────────────────────────────────────────
 
@@ -334,6 +335,12 @@ class ThunderSTORMAnalyzer(toga.App):
             self._plot_config = PlotConfig()
             self._n_spots: int = 3
             self._max_triplets: int = 10
+            self._min_blink_cycles = 2
+            self._min_blink_frames = 5
+            self._blink_gap_frames = 2
+            self._dbscan_min_samples = 3
+            self._render_bin_size_nm = 20
+            self._collinear_angle_deg = 30.0
 
             # ── Sidebar ───────────────────────────────────────────────────────
             sidebar = toga.Box(style=Pack(direction=COLUMN, margin=12, width=200,
@@ -476,7 +483,7 @@ class ThunderSTORMAnalyzer(toga.App):
         box.add(toga.Label("─" * 80, style=Pack(color="#cccccc", margin_top=8, margin_bottom=8)))
 
         nspots_row = toga.Box(style=Pack(direction=ROW, margin_bottom=8))
-        nspots_row.add(toga.Label("Number of binding spots (DNA origami):",
+        nspots_row.add(toga.Label("Spots per structure (DNA origami):",
                                    style=Pack(width=280, color="#212121", margin_right=8)))
         self._n_spots_input = toga.TextInput(value="3", style=Pack(width=60))
         nspots_row.add(self._n_spots_input)
@@ -488,6 +495,43 @@ class ThunderSTORMAnalyzer(toga.App):
         self._max_triplets_input = toga.TextInput(value="10", style=Pack(width=60))
         max_triplets_row.add(self._max_triplets_input)
         box.add(max_triplets_row)
+
+        box.add(toga.Label("─" * 80, style=Pack(color="#cccccc", margin_top=4, margin_bottom=8)))
+        box.add(toga.Label("Advanced Detection Parameters",
+                            style=Pack(color="#1a237e", font_size=12, margin_bottom=4)))
+        box.add(toga.Label(
+            "Blinking detection thresholds — tune for your camera frame rate and sample density.",
+            style=Pack(color="#546e7a", font_size=9, margin_bottom=10)))
+
+        adv_lbl = Pack(width=200, color="#212121", margin_right=8)
+        adv_inp = Pack(width=60)
+
+        adv_row1 = toga.Box(style=Pack(direction=ROW, margin_bottom=6))
+        adv_row1.add(toga.Label("Min on/off cycles:", style=adv_lbl))
+        self._min_blink_cycles_input = toga.TextInput(value="2", style=adv_inp)
+        adv_row1.add(self._min_blink_cycles_input)
+        adv_row1.add(toga.Label("  Min active frames:", style=adv_lbl))
+        self._min_blink_frames_input = toga.TextInput(value="5", style=adv_inp)
+        adv_row1.add(self._min_blink_frames_input)
+        box.add(adv_row1)
+
+        adv_row2 = toga.Box(style=Pack(direction=ROW, margin_bottom=6))
+        adv_row2.add(toga.Label("Blink gap (frames):", style=adv_lbl))
+        self._blink_gap_frames_input = toga.TextInput(value="2", style=adv_inp)
+        adv_row2.add(self._blink_gap_frames_input)
+        adv_row2.add(toga.Label("  Min locs per cluster:", style=adv_lbl))
+        self._dbscan_min_samples_input = toga.TextInput(value="3", style=adv_inp)
+        adv_row2.add(self._dbscan_min_samples_input)
+        box.add(adv_row2)
+
+        adv_row3 = toga.Box(style=Pack(direction=ROW, margin_bottom=6))
+        adv_row3.add(toga.Label("Render bin size (nm):", style=adv_lbl))
+        self._render_bin_size_input = toga.TextInput(value="20", style=adv_inp)
+        adv_row3.add(self._render_bin_size_input)
+        adv_row3.add(toga.Label("  Collinear angle (°):", style=adv_lbl))
+        self._collinear_angle_input = toga.TextInput(value="30.0", style=adv_inp)
+        adv_row3.add(self._collinear_angle_input)
+        box.add(adv_row3)
 
         box.add(toga.Label("─" * 80, style=Pack(color="#cccccc", margin_top=4, margin_bottom=8)))
         box.add(toga.Label("Plot Selection",
@@ -561,6 +605,30 @@ class ThunderSTORMAnalyzer(toga.App):
             self._max_triplets = max(1, int(self._max_triplets_input.value))
         except (ValueError, TypeError):
             self._max_triplets = 10
+        try:
+            self._min_blink_cycles = max(1, int(self._min_blink_cycles_input.value))
+        except (ValueError, TypeError):
+            self._min_blink_cycles = 2
+        try:
+            self._min_blink_frames = max(1, int(self._min_blink_frames_input.value))
+        except (ValueError, TypeError):
+            self._min_blink_frames = 5
+        try:
+            self._blink_gap_frames = max(1, int(self._blink_gap_frames_input.value))
+        except (ValueError, TypeError):
+            self._blink_gap_frames = 2
+        try:
+            self._dbscan_min_samples = max(1, int(self._dbscan_min_samples_input.value))
+        except (ValueError, TypeError):
+            self._dbscan_min_samples = 3
+        try:
+            self._render_bin_size_nm = max(1, int(self._render_bin_size_input.value))
+        except (ValueError, TypeError):
+            self._render_bin_size_nm = 20
+        try:
+            self._collinear_angle_deg = float(self._collinear_angle_input.value)
+        except (ValueError, TypeError):
+            self._collinear_angle_deg = 30.0
 
     # ── Dataset management ────────────────────────────────────────────────────
 
@@ -622,6 +690,12 @@ class ThunderSTORMAnalyzer(toga.App):
         for entry in datasets:
             entry.qc.n_spots = self._n_spots
             entry.qc.max_triplets = self._max_triplets
+            entry.qc.min_blink_cycles = self._min_blink_cycles
+            entry.qc.min_blink_frames = self._min_blink_frames
+            entry.qc.blink_gap_frames = self._blink_gap_frames
+            entry.qc.dbscan_min_samples = self._dbscan_min_samples
+            entry.qc.render_bin_size_nm = self._render_bin_size_nm
+            entry.qc.collinear_angle_deg = self._collinear_angle_deg
 
         self.run_btn.enabled = False
         self.add_btn.enabled = False

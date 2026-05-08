@@ -39,6 +39,12 @@ class QcParams:
     spacing_tol_nm: float = 20.0
     n_spots: int = 3
     max_triplets: int = 10
+    min_blink_cycles: int = 2
+    min_blink_frames: int = 5
+    blink_gap_frames: int = 2
+    dbscan_min_samples: int = 3
+    render_bin_size_nm: int = 20
+    collinear_angle_deg: float = 30.0
 
 
 @dataclass
