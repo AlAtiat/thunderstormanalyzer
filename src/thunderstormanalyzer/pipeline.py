@@ -604,14 +604,16 @@ def _write_interactive_viewer(
     render_bin_size_nm: int = 20,
     log_fn: LogFn | None = None,
 ) -> Path | None:
-    """Render one PNG per triplet, then bundle them into a self-contained HTML carousel.
+    """Render one PNG per triplet plus per-spot on/off traces, bundled into a self-contained HTML carousel.
 
-    The HTML file (blinking_interactive.html) embeds each triplet PNG as base64 so it
-    works offline and can be loaded by toga.WebView via a file:// URL.
+    Each slide shows the main 4-panel triplet image followed by individual single-emitter
+    blinking trace charts (one per spot), matching the Fiji plugin HTML carousel layout.
+    Works offline; loaded by toga.WebView via a file:// URL.
     Returns the path to the HTML file, or None if no triplets exist.
     """
     import base64
     import io
+    import json as _json
     import matplotlib.patches as mpatches
     import matplotlib.gridspec as gridspec
 
@@ -627,10 +629,12 @@ def _write_interactive_viewer(
     all_frames = np.arange(frame_min, frame_max + 1)
 
     locs_3sigma_for_render = lc.LocData.from_dataframe(dataframe=df_3sigma)
-    b64_images: list[str] = []
+
+    # Each entry: {"main": b64str, "traces": [b64str, ...], "meta": ["Spot #1 | N cycles | M frames", ...]}
+    slides: list[dict] = []
 
     for t_idx, triplet in enumerate(all_triplets):
-        # --- Build blinking traces ---
+        # --- Build intensity blinking traces for combined panel ---
         traces = []
         for sp in triplet:
             grp = sp["df"].groupby(frame_col)[intensity_col].mean()
@@ -638,6 +642,7 @@ def _write_interactive_viewer(
             trace[grp.index] = grp.values
             traces.append(trace)
 
+        main_b64 = None
         try:
             fig = plt.figure(figsize=(16, 12), facecolor="black")
             gs = gridspec.GridSpec(
@@ -650,7 +655,7 @@ def _write_interactive_viewer(
             ax_zoom  = fig.add_subplot(gs[0, 1])
             ax_combo = fig.add_subplot(gs[1, :])
 
-            # Full super-res image (left panel) — no circles
+            # Full super-res image (left panel)
             ax_main.set_facecolor("black")
             lc.render_2d(locs_3sigma_for_render, bin_size=render_bin_size_nm,
                          rescale=lc.Trafo.EQUALIZE,
@@ -721,7 +726,7 @@ def _write_interactive_viewer(
             for spine in ax_zoom.spines.values():
                 spine.set_edgecolor("white")
 
-            # Blinking traces
+            # Combined normalised blinking traces
             n_spots = len(triplet)
             ax_combo.set_facecolor("#0a0a0a")
             for i, (sp, color, trace) in enumerate(
@@ -750,32 +755,78 @@ def _write_interactive_viewer(
             fig.savefig(buf, format="png", dpi=120, bbox_inches="tight",
                         facecolor="black")
             plt.close(fig)
-            b64_images.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+            main_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception as exc:
             _log(f"  [WARN] Triplet {t_idx + 1} render failed: {exc}")
             plt.close("all")
 
-    if not b64_images:
+        if main_b64 is None:
+            continue
+
+        # --- Per-spot binary on/off trace charts (single-emitter blinking traces) ---
+        spot_b64s: list[str] = []
+        spot_metas: list[str] = []
+        for k, sp in enumerate(triplet):
+            try:
+                frames_arr = sp["df"][frame_col].values
+                if len(frames_arr) == 0:
+                    continue
+                f_min = int(frames_arr.min())
+                f_max = int(frames_arr.max())
+                spot_frames = np.arange(f_min, f_max + 1)
+                detected = set(int(f) for f in frames_arr)
+                on_off = np.array([1.0 if f in detected else 0.0 for f in spot_frames])
+                n_cyc = _count_on_off_cycles(frames_arr)
+                n_det = len(detected)
+                color = _SPOT_COLORS[k % len(_SPOT_COLORS)]
+
+                sfig, sax = plt.subplots(figsize=(6, 2), facecolor="#111111")
+                sax.set_facecolor("#111111")
+                sax.step(spot_frames, on_off, where="post", color=color, linewidth=1.2)
+                sax.fill_between(spot_frames, on_off, step="post", color=color, alpha=0.25)
+                sax.set_ylim(-0.05, 1.45)
+                sax.set_xlabel("Frame", color="white", fontsize=9)
+                sax.set_ylabel("On / Off", color="white", fontsize=9)
+                sax.set_title(f"Spot #{k + 1} — {n_cyc} cycle{'s' if n_cyc != 1 else ''}",
+                              color="white", fontsize=9)
+                sax.tick_params(colors="white", labelsize=8)
+                for spine in sax.spines.values():
+                    spine.set_edgecolor("#444444")
+                sbuf = io.BytesIO()
+                sfig.savefig(sbuf, format="png", dpi=150, bbox_inches="tight",
+                             facecolor="#111111")
+                plt.close(sfig)
+                spot_b64s.append(base64.b64encode(sbuf.getvalue()).decode("ascii"))
+                spot_metas.append(f"Spot #{k + 1}&nbsp;|&nbsp;{n_cyc} cycle{'s' if n_cyc != 1 else ''}&nbsp;|&nbsp;{n_det} frames")
+            except Exception as exc:
+                _log(f"  [WARN] Spot trace render failed (triplet {t_idx + 1}, spot {k + 1}): {exc}")
+                plt.close("all")
+
+        slides.append({"main": main_b64, "traces": spot_b64s, "meta": spot_metas})
+
+    if not slides:
         return None
 
-    # Build self-contained HTML carousel — no CDN, works offline
-    imgs_js = ",\n".join(f'"{b}"' for b in b64_images)
+    # Serialise slides to JS — use json.dumps for safe escaping
+    slides_js = _json.dumps(slides)
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <style>
+  * {{ box-sizing: border-box; }}
   body {{
     margin: 0; padding: 0;
     background: #111; color: #eee;
     font-family: monospace; font-size: 13px;
     display: flex; flex-direction: column; align-items: center;
-    height: 100vh; box-sizing: border-box;
+    min-height: 100vh;
   }}
   #nav {{
     display: flex; align-items: center; gap: 16px;
     padding: 8px 12px; background: #1e1e1e;
-    width: 100%; box-sizing: border-box;
+    width: 100%; position: sticky; top: 0; z-index: 10;
   }}
   button {{
     background: #333; color: #eee; border: 1px solid #555;
@@ -783,9 +834,25 @@ def _write_interactive_viewer(
   }}
   button:disabled {{ opacity: 0.35; cursor: default; }}
   #counter {{ flex: 1; text-align: center; }}
-  #triplet-img {{
-    max-width: 100%; max-height: calc(100vh - 50px);
-    object-fit: contain; display: block;
+  #main-img {{ max-width: 100%; display: block; }}
+  #traces-section {{
+    width: 100%; padding: 10px 12px 4px;
+    border-top: 1px solid #333;
+  }}
+  #traces-section h3 {{
+    margin: 0 0 8px; font-size: 12px; color: #7ec8e3; letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }}
+  #traces-row {{
+    display: flex; flex-wrap: wrap; gap: 10px;
+  }}
+  .trace-card {{
+    flex: 1; min-width: 260px; max-width: 480px;
+    background: #1e1e1e; border-radius: 6px; padding: 6px;
+  }}
+  .trace-card img {{ width: 100%; display: block; border-radius: 4px; }}
+  .trace-card p {{
+    margin: 4px 0 0; font-size: 11px; color: #aaa; text-align: center;
   }}
 </style>
 </head>
@@ -795,19 +862,36 @@ def _write_interactive_viewer(
   <span id="counter"></span>
   <button id="next" onclick="show(current+1)">Next &#8594;</button>
 </div>
-<img id="triplet-img" src="" alt="triplet">
+<img id="main-img" src="" alt="triplet">
+<div id="traces-section">
+  <h3>Single-emitter blinking traces</h3>
+  <div id="traces-row"></div>
+</div>
 <script>
-  const imgs = [
-{imgs_js}
-  ];
+  const slides = {slides_js};
   let current = 0;
   function show(i) {{
-    if (i < 0 || i >= imgs.length) return;
+    if (i < 0 || i >= slides.length) return;
     current = i;
-    document.getElementById('triplet-img').src = 'data:image/png;base64,' + imgs[i];
-    document.getElementById('counter').textContent = 'Triplet ' + (i + 1) + ' / ' + imgs.length;
+    const s = slides[i];
+    document.getElementById('main-img').src = 'data:image/png;base64,' + s.main;
+    document.getElementById('counter').textContent = 'Triplet ' + (i + 1) + ' / ' + slides.length;
     document.getElementById('prev').disabled = i === 0;
-    document.getElementById('next').disabled = i === imgs.length - 1;
+    document.getElementById('next').disabled = i === slides.length - 1;
+    const row = document.getElementById('traces-row');
+    row.innerHTML = '';
+    for (let k = 0; k < s.traces.length; k++) {{
+      const card = document.createElement('div');
+      card.className = 'trace-card';
+      const img = document.createElement('img');
+      img.src = 'data:image/png;base64,' + s.traces[k];
+      img.alt = 'Spot ' + (k + 1);
+      const p = document.createElement('p');
+      p.innerHTML = s.meta[k];
+      card.appendChild(img);
+      card.appendChild(p);
+      row.appendChild(card);
+    }}
   }}
   show(0);
 </script>
@@ -816,8 +900,67 @@ def _write_interactive_viewer(
 
     html_path = out_dir / "blinking_interactive.html"
     html_path.write_text(html, encoding="utf-8")
-    _log(f"  [INFO] {len(b64_images)} triplet(s) written to blinking_interactive.html")
+    _log(f"  [INFO] {len(slides)} triplet(s) written to blinking_interactive.html")
     return html_path
+
+
+def _save_spot_trace_pngs(
+    all_triplets: list[list[dict]],
+    out_dir: Path,
+    frame_col: str = "frame",
+    intensity_col: str = "intensity",
+    log_fn: LogFn | None = None,
+) -> None:
+    """Save one on/off blinking trace PNG per spot per triplet (mirrors Fiji HtmlCarousel)."""
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    traces_dir = out_dir / "blinking_traces"
+    traces_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = 0
+    for t_idx, triplet in enumerate(all_triplets):
+        for k, sp in enumerate(triplet):
+            try:
+                frames_arr = sp["df"][frame_col].values
+                if len(frames_arr) == 0:
+                    continue
+
+                frame_min = int(frames_arr.min())
+                frame_max = int(frames_arr.max())
+                all_f = np.arange(frame_min, frame_max + 1)
+
+                # Binary on/off: 1.0 if any localization detected in that frame
+                detected = set(int(f) for f in frames_arr)
+                on_off = np.array([1.0 if f in detected else 0.0 for f in all_f])
+
+                n_cyc = _count_on_off_cycles(frames_arr)
+                color = _SPOT_COLORS[k % len(_SPOT_COLORS)]
+
+                fig, ax = plt.subplots(figsize=(6, 2), facecolor="#111111")
+                ax.set_facecolor("#111111")
+                ax.step(all_f, on_off, where="post", color=color, linewidth=1.2)
+                ax.fill_between(all_f, on_off, step="post", color=color, alpha=0.25)
+                ax.set_ylim(-0.05, 1.45)
+                ax.set_xlabel("Frame", color="white", fontsize=9)
+                ax.set_ylabel("On / Off", color="white", fontsize=9)
+                ax.set_title(f"Spot #{k + 1} — {n_cyc} cycle{'s' if n_cyc != 1 else ''}",
+                             color="white", fontsize=9)
+                ax.tick_params(colors="white", labelsize=8)
+                for spine in ax.spines.values():
+                    spine.set_edgecolor("#444444")
+
+                fname = traces_dir / f"triplet_{t_idx + 1:02d}_spot_{k + 1}.png"
+                fig.savefig(fname, dpi=150, bbox_inches="tight", facecolor="#111111")
+                plt.close(fig)
+                saved += 1
+            except Exception as exc:
+                _log(f"  [WARN] Spot trace PNG failed (triplet {t_idx + 1}, spot {k + 1}): {exc}")
+                plt.close("all")
+
+    if saved:
+        _log(f"  [INFO] {saved} spot trace PNG(s) saved to blinking_traces/")
 
 
 def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
@@ -1294,6 +1437,12 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
                     log_fn=log_fn,
                 )
                 stats["viewer_html_path"] = str(viewer_html) if viewer_html else None
+                _save_spot_trace_pngs(
+                    all_triplets, out_dir,
+                    frame_col=c.frame_col,
+                    intensity_col=c.intensity_col,
+                    log_fn=log_fn,
+                )
             else:
                 log_fn(f"  [WARN] {detection_msg}")
             stats["blinking_spots_found"] = blinking_spots_found

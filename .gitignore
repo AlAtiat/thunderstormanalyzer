@@ -63,3 +63,13 @@ logs/
 
 # Briefcase local configuratoin
 .briefcase/
+
+*.tex
+.*/
+figures/
+
+# Java / Maven (fiji-plugin)
+fiji-plugin/target/
+dependency-reduced-pom.xml
+*.class
+*.jar

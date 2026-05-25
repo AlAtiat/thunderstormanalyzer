@@ -1,4 +1,4 @@
-"""ThunderSTORM Analyzer — BeeWare/Toga GUI application."""
+"""ThunderSTORM Origami Analyzer — BeeWare/Toga GUI application."""
 from __future__ import annotations
 
 import asyncio
@@ -87,10 +87,7 @@ class DatasetRow(toga.Box):
             color="#1565C0", font_size=10, margin_top=6, margin_bottom=4))
 
         qc_row1 = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
-        qc_row1.add(toga.Label("Pixel size (nm):", style=lbl_style))
-        self.qc_pixel_size = toga.TextInput(value="65.0", style=Pack(width=65))
-        qc_row1.add(self.qc_pixel_size)
-        qc_row1.add(toga.Label("  Max sigma (nm):", style=lbl_style))
+        qc_row1.add(toga.Label("Max sigma (nm):", style=lbl_style))
         self.qc_max_sigma = toga.TextInput(value="768.0", style=Pack(width=65))
         qc_row1.add(self.qc_max_sigma)
 
@@ -147,7 +144,6 @@ class DatasetRow(toga.Box):
         except (ValueError, ZeroDivisionError):
             self.effective_px_label.text = "Effective pixel size: — nm/px"
             return
-        self.qc_pixel_size.value = f"{nm:.2f}"
         self.effective_px_label.text = f"Effective pixel size: {nm:.2f} nm/px"
 
     # ── File browsers ─────────────────────────────────────────────────────────
@@ -211,7 +207,6 @@ class DatasetRow(toga.Box):
         # Camera pixel: protocol pixelSize is the effective pixel, so set camera=pixel, mag=1
         self.qc_camera_px.value = f"{qc.pixel_size_nm:.1f}"
         self.qc_magnification.value = "1"
-        self.qc_pixel_size.value = f"{qc.pixel_size_nm:.1f}"
         self.qc_max_sigma.value = f"{qc.max_sigma_nm:.1f}"
         self.qc_max_unc.value = f"{qc.max_uncertainty_nm:.1f}"
         self.qc_min_intensity.value = f"{qc.min_intensity:.1f}"
@@ -276,7 +271,7 @@ class ThunderSTORMAnalyzer(toga.App):
         except Exception:
             pass
 
-        self.main_window = toga.MainWindow(title="ThunderSTORM Analyzer",
+        self.main_window = toga.MainWindow(title="ThunderSTORM Origami Analyzer",
                                             size=(1200, 760))
         self.main_window.content = splash_box
 
@@ -346,7 +341,7 @@ class ThunderSTORMAnalyzer(toga.App):
             sidebar = toga.Box(style=Pack(direction=COLUMN, margin=12, width=200,
                                            background_color="#e8eaf6"))
 
-            sidebar.add(toga.Label("ThunderSTORM\nAnalyzer",
+            sidebar.add(toga.Label("ThunderSTORM\nOrigami Analyzer",
                                    style=Pack(color="#1a237e", font_size=14,
                                               margin_bottom=16, text_align="center")))
 
@@ -761,18 +756,26 @@ class ThunderSTORMAnalyzer(toga.App):
         tabs.content.append(toga.OptionItem("Stats", self._make_stats_box(r)))
         tabs.content.append(toga.OptionItem("Images", self._make_images_box(r)))
         tabs.content.append(toga.OptionItem("Plots", self._make_plots_box(r)))
-        if r.viewer_html_path and r.viewer_html_path.exists():
-            tabs.content.append(toga.OptionItem(
-                "Origami Viewer", self._make_origami_viewer_box(r)))
+        tabs.content.append(toga.OptionItem("Origami Viewer", self._make_origami_viewer_box(r)))
         return tabs
 
     def _make_origami_viewer_box(self, r) -> toga.Box:
-        """Render the origami triplet carousel inside a toga WebView."""
+        """Render the origami triplet carousel, or explain why it's not available."""
         outer = toga.Box(style=Pack(direction=COLUMN, flex=1))
-        html = r.viewer_html_path.read_text(encoding="utf-8")
-        wv = toga.WebView(style=Pack(flex=1))
-        wv.set_content("http://localhost/", html)
-        outer.add(wv)
+        if r.viewer_html_path and r.viewer_html_path.exists():
+            html = r.viewer_html_path.read_text(encoding="utf-8")
+            wv = toga.WebView(style=Pack(flex=1))
+            wv.set_content("http://localhost/", html)
+            outer.add(wv)
+        elif r.error:
+            outer.add(toga.Label(
+                "Analysis failed — no origami viewer.",
+                style=Pack(color="#c62828", margin=16)))
+        else:
+            outer.add(toga.Label(
+                "Origami Viewer not available.\n"
+                "Enable 'Blinking showcase' in the Configuration tab and re-run.",
+                style=Pack(color="#9e9e9e", margin=16)))
         return outer
 
     def _make_stats_box(self, r) -> toga.ScrollContainer:
@@ -1065,7 +1068,7 @@ class ThunderSTORMAnalyzer(toga.App):
         save_path = await self.main_window.dialog(
             toga.SaveFileDialog(
                 title="Export results as ZIP",
-                suggested_filename="thunderstorm_results.zip",
+                suggested_filename="origami_results.zip",
                 file_types=["zip"],
             ))
         if save_path is None:
@@ -1100,7 +1103,7 @@ class ThunderSTORMAnalyzer(toga.App):
 
 def main() -> ThunderSTORMAnalyzer:
     return ThunderSTORMAnalyzer(
-        "ThunderSTORM Analyzer",
+        "ThunderSTORM Origami Analyzer",
         "com.thunderstormanalyzer.thunderstormanalyzer",
         icon="resources/icons/thunderstormanalyzer",
     )

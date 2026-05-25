@@ -1,6 +1,6 @@
 # This project was generated with 0.4.1 using template: https://github.com/beeware/briefcase-template @ v0.4.1
 [tool.briefcase]
-project_name = "ThunderSTORMAnalyzer"
+project_name = "ThunderSTORM Origami Analyzer"
 bundle = "com.thunderstormanalyzer"
 version = "0.0.1"
 url = "https://github.com/AlAtiat/thunderstormanalyzer"
@@ -9,12 +9,12 @@ author = "Aun Al Atiat"
 author_email = "aun@alatiat.com"
 
 [tool.briefcase.app.thunderstormanalyzer]
-formal_name = "ThunderSTORMAnalyzer"
+formal_name = "ThunderSTORM Origami Analyzer"
 
-description = "Automated analysis of ThunderSTORM localization data and reconstruction of super-resolution images."
+description = "Automated DNA origami analysis of ThunderSTORM localization data and reconstruction of super-resolution images."
 
 long_description = """
-ThunderSTORMAnalyzer is a desktop application for automated processing, analysis, and visualization of ThunderSTORM single-molecule localization microscopy data.
+ThunderSTORM Origami Analyzer is a desktop application for automated processing, analysis, and visualization of ThunderSTORM single-molecule localization microscopy data.
 
 The app is designed to simplify the workflow after ThunderSTORM analysis by reading exported localization tables, applying quality-control filters, generating reconstructed super-resolution images, and producing summary plots and result files automatically.
 
