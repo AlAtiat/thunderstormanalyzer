@@ -275,34 +275,44 @@ public class PlotWriter {
         g.setStroke(new BasicStroke(2.0f));
         g.drawRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
 
-        // Dashed connector lines: alpha=0.7, linewidth=1.2, white
-        g.setColor(new Color(255, 255, 255, (int)(255 * 0.7)));
-        float[] dash = {6f, 3f};
-        g.setStroke(new BasicStroke(1.2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, dash, 0f));
-        g.drawLine(rx1, ry0, mainW, 0);
-        g.drawLine(rx1, ry1, mainW, srH);
-
         // Title: fontsize ~20 pt at 200 dpi ≈ 40 px; white
         g.setColor(Color.WHITE);
         g.setFont(new Font("SansSerif", Font.BOLD, 40));
         g.drawString(datasetName + " — DNA origami triplet", 24, 52);
 
-        // --- Panel 2: Zoomed SR patch (top-right) ---
+        // --- Panel 2: Zoomed SR patch (top-right), inset with margin so connectors
+        //     visibly travel to the patch corners rather than the full-panel edges ---
+        int zoomMargin = srH / 8;   // ~12.5% padding on all sides inside the zoom cell
+        int zoomImgX = mainW + zoomMargin;
+        int zoomImgY = zoomMargin;
+        int zoomImgW = zoomW - 2 * zoomMargin;
+        int zoomImgH = srH  - 2 * zoomMargin;
+
         int cropX = clamp((int)((bx0 - minX) / binSizeNm), 0, srFull.getWidth() - 1);
         int cropY = clamp((int)((by0 - minY) / binSizeNm), 0, srFull.getHeight() - 1);
         int cropW = clamp((int)((bx1 - bx0)  / binSizeNm), 1, srFull.getWidth()  - cropX);
         int cropH = clamp((int)((by1 - by0)  / binSizeNm), 1, srFull.getHeight() - cropY);
         BufferedImage patch = srFull.getSubimage(cropX, cropY, cropW, cropH);
-        Image scaledZoom = patch.getScaledInstance(zoomW, srH, Image.SCALE_AREA_AVERAGING);
-        g.drawImage(scaledZoom, mainW, 0, null);
+        // Fill zoom cell background first so the margin area is black
+        g.setColor(Color.BLACK);
+        g.fillRect(mainW, 0, zoomW, srH);
+        Image scaledZoom = patch.getScaledInstance(zoomImgW, zoomImgH, Image.SCALE_AREA_AVERAGING);
+        g.drawImage(scaledZoom, zoomImgX, zoomImgY, null);
 
-        double zoomScaleX = (double) zoomW / (bx1 - bx0);
-        double zoomScaleY = (double) srH   / (by1 - by0);
+        double zoomScaleX = (double) zoomImgW / (bx1 - bx0);
+        double zoomScaleY = (double) zoomImgH / (by1 - by0);
 
-        // White border around the zoom panel
+        // White border around the inset zoom image
         g.setColor(Color.WHITE);
         g.setStroke(new BasicStroke(3.0f));
-        g.drawRect(mainW, 0, zoomW - 1, srH - 1);
+        g.drawRect(zoomImgX, zoomImgY, zoomImgW - 1, zoomImgH - 1);
+
+        // Dashed connector lines from bounding-box corners → zoom image corners
+        g.setColor(new Color(255, 255, 255, (int)(255 * 0.7)));
+        float[] dash = {6f, 3f};
+        g.setStroke(new BasicStroke(1.2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, dash, 0f));
+        g.drawLine(rx1, ry0, zoomImgX, zoomImgY);
+        g.drawLine(rx1, ry1, zoomImgX, zoomImgY + zoomImgH);
 
         // --- Nm coordinate axis labels on the zoom panel ---
         g.setFont(new Font("SansSerif", Font.PLAIN, 24));
@@ -310,43 +320,43 @@ public class PlotWriter {
         int tickLen = 12;
         double tickStep = 100.0; // nm per tick
 
-        // X-axis: labels inside the bottom of the zoom panel
+        // X-axis: ticks and labels BELOW the border (in the bottom margin)
         double xTickStart = Math.ceil(bx0 / tickStep) * tickStep;
         for (double xNm = xTickStart; xNm <= bx1; xNm += tickStep) {
-            int px = mainW + (int)((xNm - bx0) * zoomScaleX);
-            if (px < mainW || px > mainW + zoomW) continue;
+            int px = zoomImgX + (int)((xNm - bx0) * zoomScaleX);
+            if (px < zoomImgX || px > zoomImgX + zoomImgW) continue;
             g.setColor(Color.WHITE);
             g.setStroke(new BasicStroke(1.5f));
-            g.drawLine(px, srH - tickLen, px, srH - 3);
+            g.drawLine(px, zoomImgY + zoomImgH + 3, px, zoomImgY + zoomImgH + tickLen);
             String lbl = String.format("%.0f", xNm);
             int lw = fmAxis.stringWidth(lbl);
-            g.drawString(lbl, px - lw / 2, srH - tickLen - 4);
+            g.drawString(lbl, px - lw / 2, zoomImgY + zoomImgH + tickLen + fmAxis.getAscent());
         }
 
-        // Y-axis: labels inside the left edge of the zoom panel
+        // Y-axis: ticks and labels to the LEFT of the border (in the left margin)
         double yTickStart = Math.ceil(by0 / tickStep) * tickStep;
         for (double yNm = yTickStart; yNm <= by1; yNm += tickStep) {
-            int py = (int)((yNm - by0) * zoomScaleY);
-            if (py < 0 || py > srH) continue;
+            int py = zoomImgY + (int)((yNm - by0) * zoomScaleY);
+            if (py < zoomImgY || py > zoomImgY + zoomImgH) continue;
             g.setColor(Color.WHITE);
             g.setStroke(new BasicStroke(1.5f));
-            g.drawLine(mainW + 3, py, mainW + tickLen, py);
+            g.drawLine(zoomImgX - tickLen, py, zoomImgX - 3, py);
             String lbl = String.format("%.0f", yNm);
-            g.drawString(lbl, mainW + tickLen + 4, py + fmAxis.getAscent() / 2);
+            int lw = fmAxis.stringWidth(lbl);
+            g.drawString(lbl, zoomImgX - tickLen - 4 - lw, py + fmAxis.getAscent() / 2);
         }
 
-        // Spot circles: r=max(vis_radius, 15.0)=30 nm → pixels; linewidth=2.0; alpha=0.9
+        // Spot circles: r=30 nm → pixels; linewidth=2.0; alpha=0.9
         g.setStroke(new BasicStroke(2.0f));
         int nSpotsDraw = Math.min(triplet.centreX.length, SPOT_COLORS.length);
         for (int k = 0; k < nSpotsDraw; k++) {
             double cx = triplet.centreX[k];
             double cy = triplet.centreY[k];
-            int px = mainW + (int)((cx - bx0) * zoomScaleX);
-            int py = (int)((cy - by0) * zoomScaleY);
+            int px = zoomImgX + (int)((cx - bx0) * zoomScaleX);
+            int py = zoomImgY + (int)((cy - by0) * zoomScaleY);
             double rNm = 30.0;
             int rad = Math.max((int)(rNm * Math.min(zoomScaleX, zoomScaleY)), 8);
             Color col = SPOT_COLORS[k % SPOT_COLORS.length];
-            // alpha = 0.9
             Composite origComp = g.getComposite();
             g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.9f));
             g.setColor(col);
@@ -354,29 +364,25 @@ public class PlotWriter {
             g.setComposite(origComp);
         }
 
-        // Scale bar: bar_x0 = bx0 + pad*0.15, bar_y = by0 + pad*0.25 (Python convention)
-        // Convert nm → zoom panel pixels
+        // Scale bar positioned in lower-left of zoom image
         double barXnm = bx0 + padNm * 0.15;
-        double barYnm = by0 + padNm * 0.25;
-        int barX  = mainW + (int)((barXnm - bx0) * zoomScaleX);
-        int barY  = (int)((barYnm - by0) * zoomScaleY);
+        double barYnm = by1 - padNm * 0.25;
+        int barX  = zoomImgX + (int)((barXnm - bx0) * zoomScaleX);
+        int barY  = zoomImgY + (int)((barYnm - by0) * zoomScaleY);
         int barPx = (int)(100.0 * zoomScaleX);
-        // Scale bar line: linewidth 2.5, white
         g.setColor(Color.WHITE);
         g.setStroke(new BasicStroke(2.5f));
         g.drawLine(barX, barY, barX + barPx, barY);
-        // Label: fontsize ~14 pt at 200 dpi ≈ 28 px; centered above bar
         int labelFontSz = 28;
         g.setFont(new Font("SansSerif", Font.PLAIN, labelFontSz));
         FontMetrics fm = g.getFontMetrics();
         String barLabel = "100 nm";
         int labelW = fm.stringWidth(barLabel);
-        int labelY = barY - (int)(padNm * 0.06 * zoomScaleY);
-        g.drawString(barLabel, barX + barPx / 2 - labelW / 2, labelY);
+        g.drawString(barLabel, barX + barPx / 2 - labelW / 2, barY - 6);
 
-        // Zoom panel subtitle
+        // Zoom panel subtitle inside the inset
         g.setFont(new Font("SansSerif", Font.BOLD, 36));
-        g.drawString("Magnified structure", mainW + 20, 46);
+        g.drawString("Magnified", zoomImgX + 20, zoomImgY + 46);
 
         // --- Panel 3: Stacked blinking traces (bottom, full width) ---
         drawStackedTraces(g, triplet, allFrames, allIntensity, clusterLabels,
