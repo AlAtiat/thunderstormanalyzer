@@ -10,7 +10,7 @@
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
-    <name>ThunderSTORM Analyzer</name>
+    <name>ThunderSTORM Origami Analyzer</name>
     <description>Fiji plugin for SMLM QC, SR reconstruction and DNA origami blinking analysis.</description>
     <url>https://github.com/AlAtiat/thunderstormanalyzer</url>
 
