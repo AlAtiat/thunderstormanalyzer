@@ -35,16 +35,20 @@ public class BlinkingScorer {
      * @param labels      DBSCAN labels
      * @param nClusters   number of valid clusters
      * @param gapThreshold frames gap considered an off-event (default 1)
+     * @param minCycles    minimum on/off cycles for a cluster to score > 0 (blink gate)
+     * @param minFrames    minimum unique active frames for a cluster to score > 0 (blink gate)
      * @param totalFrames  total frames in the acquisition (for FFT signal length)
      */
     public static ClusterScore[] scoreAll(double[] x, double[] y,
                                           double[] intensity, double[] frame,
                                           int[] labels, int nClusters,
-                                          int gapThreshold, int totalFrames) {
+                                          int gapThreshold, int minCycles, int minFrames,
+                                          int totalFrames) {
         ClusterScore[] scores = new ClusterScore[nClusters];
         for (int cid = 0; cid < nClusters; cid++) {
             int[] members = DbscanClusterer.clusterMembers(labels, cid);
-            scores[cid] = scoreCluster(cid, members, intensity, frame, gapThreshold, totalFrames);
+            scores[cid] = scoreCluster(cid, members, intensity, frame,
+                                       gapThreshold, minCycles, minFrames, totalFrames);
         }
         // Sort descending by score
         Arrays.sort(scores, (a, b) -> Double.compare(b.score, a.score));
@@ -53,12 +57,19 @@ public class BlinkingScorer {
 
     private static ClusterScore scoreCluster(int cid, int[] members,
                                              double[] intensity, double[] frame,
-                                             int gapThreshold, int totalFrames) {
+                                             int gapThreshold, int minCycles, int minFrames,
+                                             int totalFrames) {
         ClusterScore cs = new ClusterScore();
         cs.clusterId = cid;
 
         // Gather frames and intensities for this cluster
         int n = members.length;
+        if (n == 0) {            // empty cluster — cannot blink
+            cs.frames = new double[0];
+            cs.intensities = new double[0];
+            cs.score = 0.0;
+            return cs;
+        }
         double[] framesArr = new double[n];
         double[] intenArr  = new double[n];
         for (int i = 0; i < n; i++) {
@@ -89,7 +100,14 @@ public class BlinkingScorer {
         // FFT periodicity
         cs.periodicity = fourierPeriodicity(uniqueFrames, Math.max(totalFrames, (int)uniqueFrames[uniqueFrames.length-1] + 1));
 
-        cs.score = cs.nCycles * cs.nUnique * cs.consistency * (1.0 + cs.periodicity);
+        // Blink gate (mirrors Python _score_cluster): a cluster that does not switch
+        // on/off enough times, or is not active in enough frames, scores 0 and is
+        // excluded from structure detection.
+        if (cs.nCycles < minCycles || cs.nUnique < minFrames) {
+            cs.score = 0.0;
+        } else {
+            cs.score = cs.nCycles * cs.nUnique * cs.consistency * (1.0 + cs.periodicity);
+        }
         return cs;
     }
 

@@ -76,7 +76,7 @@ public class AnalysisRunner extends SwingWorker<List<DatasetResult>, String> {
                 : "<<< Done: " + entry.name);
         }
 
-        if (rawResults.size() > 1) {
+        if (plotConfig.comparisonPlots && rawResults.size() > 1) {
             publish(">>> Generating comparison plots...");
             try {
                 Path cmpDir = outputDir.resolve("comparison");

@@ -43,7 +43,14 @@ public class TripletDetector {
         // Guard: minimum 2 dots per structure
         if (nSpots < 2) nSpots = 2;
         int nClusters = scores.length;
-        if (nClusters < nSpots) return Collections.emptyList();
+
+        // Only clusters that passed the blink gate (score > 0) may form structures —
+        // mirrors the Python pipeline, which runs the geometry search over scored
+        // (genuinely blinking) clusters only.
+        Map<Integer, BlinkingScorer.ClusterScore> scoreMap = new HashMap<>();
+        for (BlinkingScorer.ClusterScore sc : scores)
+            if (sc.score > 0) scoreMap.put(sc.clusterId, sc);
+        if (scoreMap.size() < nSpots) return Collections.emptyList();
 
         // Compute cluster centroids
         double[] cx = new double[nClusters];
@@ -63,18 +70,17 @@ public class TripletDetector {
         double lo = spacingNm - spacingTolNm;
         double hi = spacingNm + spacingTolNm;
 
-        Map<Integer, BlinkingScorer.ClusterScore> scoreMap = new HashMap<>();
-        for (BlinkingScorer.ClusterScore sc : scores) scoreMap.put(sc.clusterId, sc);
-
         double angleTolRad = Math.toRadians(angleTolDeg);
         List<Triplet> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
         for (int i = 0; i < nClusters && result.size() < maxStructures * 3; i++) {
             int cidA = scores[i].clusterId;
+            if (!scoreMap.containsKey(cidA)) continue;   // skip non-blinking anchors
             int[] candidatesB = NndAnalyzer.rangeQuery(cx, cy, cx[cidA], cy[cidA], hi, centTree);
             for (int cidB : candidatesB) {
                 if (cidB == cidA) continue;
+                if (!scoreMap.containsKey(cidB)) continue;   // skip non-blinking neighbours
                 double dAB = dist(cx[cidA], cy[cidA], cx[cidB], cy[cidB]);
                 if (dAB < lo || dAB > hi) continue;
 
@@ -138,6 +144,8 @@ public class TripletDetector {
             spacingTolNm * 1.5, centTree);
 
         for (int next : candidates) {
+            // Must be a blinking-qualified cluster (score > 0)
+            if (!scoreMap.containsKey(next)) continue;
             // Must not already be in the chain
             boolean dup = false;
             for (int c : chain) if (c == next) { dup = true; break; }

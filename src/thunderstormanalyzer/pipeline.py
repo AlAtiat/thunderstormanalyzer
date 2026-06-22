@@ -536,7 +536,7 @@ def _find_all_blinking_triplets(
 
     if not all_triplets:
         msg = (f"Origami detection failed: {len(valid_pairs)} valid pairs found but no collinear "
-               f"triplets passed geometry check (angle tol={_COLLINEAR_ANGLE_DEG}°). "
+               f"triplets passed geometry check (angle tol={collinear_angle_deg:.0f}°). "
                f"Try increasing spacing_tol_nm or collinear angle tolerance.")
         _log(f"  [WARN] {msg}")
         return [], msg

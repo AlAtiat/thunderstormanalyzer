@@ -14,8 +14,12 @@ import toga
 from toga.style.pack import COLUMN, ROW, Pack
 
 from .models import ColumnConfig, DatasetEntry, PlotConfig, QcParams
-from .pipeline import qc_from_protocol, _load_protocol
 from .runner import AnalysisRunner
+
+# NOTE: `.pipeline` (which imports locan/matplotlib/numpy/pandas) is intentionally
+# NOT imported at module top — that would block app startup for several seconds.
+# It is imported lazily where needed (protocol auto-fill below) and inside the
+# background worker thread in runner.py.
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +204,9 @@ class DatasetRow(toga.Box):
     def _autofill_qc_from_protocol(self) -> None:
         if self._protocol_path is None:
             return
+        # Lazy import: pulls in .pipeline (locan/matplotlib/etc.) only when a
+        # protocol is actually loaded, keeping app startup fast.
+        from .pipeline import _load_protocol, qc_from_protocol
         protocol = _load_protocol(self._protocol_path)
         if not protocol:
             return
@@ -227,7 +234,7 @@ class DatasetRow(toga.Box):
             mag = float(self.qc_magnification.value)
             pixel_nm = cam_nm / mag
         except (ValueError, ZeroDivisionError):
-            pixel_nm = self._float(self.qc_pixel_size, d.pixel_size_nm)
+            pixel_nm = d.pixel_size_nm
             cam_nm = d.camera_pixel_size_nm
             mag = d.magnification
         qc = QcParams(
@@ -290,7 +297,10 @@ class ThunderSTORMAnalyzer(toga.App):
         self.main_window.show()
 
         async def _load_ui():
-            await asyncio.sleep(2.0)
+            # Brief minimum splash so the logo is visible; the heavy UI build below
+            # is now lightweight (no eager locan/matplotlib import), so this is the
+            # only intentional delay. Heavy libs load lazily on first analysis.
+            await asyncio.sleep(1.2)
 
             # Restore standard window chrome before swapping to real UI.
             try:
@@ -367,6 +377,11 @@ class ThunderSTORMAnalyzer(toga.App):
                                                 style=Pack(margin_bottom=8))
             self.open_results_btn.enabled = False
             sidebar.add(self.open_results_btn)
+
+            self.check_updates_btn = toga.Button("Check for Updates…",
+                                                 on_press=self._check_updates,
+                                                 style=Pack(margin_bottom=8))
+            sidebar.add(self.check_updates_btn)
 
             self.status_label = toga.Label("Status: Idle",
                                             style=Pack(color="#2e7d32", margin_top=8,
@@ -1027,6 +1042,44 @@ class ThunderSTORMAnalyzer(toga.App):
 
     def _open_results(self, widget: toga.Widget) -> None:
         self._open_dir(self._output_dir)
+
+    # ── Update check ──────────────────────────────────────────────────────────
+
+    async def _check_updates(self, widget: toga.Widget) -> None:
+        """Manually check GitHub Releases for a newer version (off the UI thread)."""
+        from . import updates
+
+        self.check_updates_btn.enabled = False
+        try:
+            release = await asyncio.to_thread(updates.fetch_latest_release)
+        finally:
+            self.check_updates_btn.enabled = True
+
+        current = updates.current_version()
+
+        if release is None:
+            await self.main_window.dialog(toga.InfoDialog(
+                "Check for Updates",
+                "Couldn't reach the update server.\n"
+                "Check your internet connection and try again."))
+            return
+
+        latest_tag = str(release.get("tag_name", "")).strip()
+        if not latest_tag or not updates.is_newer(latest_tag, current):
+            await self.main_window.dialog(toga.InfoDialog(
+                "Check for Updates",
+                f"You're up to date.\nInstalled version: {current}"))
+            return
+
+        latest_display = latest_tag.lstrip("vV")
+        open_page = await self.main_window.dialog(toga.QuestionDialog(
+            "Update Available",
+            f"Version {latest_display} is available (you have {current}).\n\n"
+            "Open the download page?"))
+        if open_page:
+            import webbrowser
+            url = str(release.get("html_url") or updates.RELEASES_PAGE)
+            webbrowser.open(url)
 
     # ── ZIP export ────────────────────────────────────────────────────────────
 

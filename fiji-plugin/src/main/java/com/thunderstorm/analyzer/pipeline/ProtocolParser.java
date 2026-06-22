@@ -100,9 +100,12 @@ public class ProtocolParser {
 
     /** Apply protocol-derived values to a QcParams object. */
     public static void autoFillQc(ProtocolInfo info, QcParams qc) {
+        // ThunderSTORM's cameraSettings.pixelSize is the EFFECTIVE pixel size; mirror the
+        // Python reference (qc_from_protocol): treat it as effective with magnification = 1
+        // rather than dividing by magnification (which would shrink it ~100×).
         qc.cameraPixelSizeNm = info.cameraPxNm;
-        qc.magnification     = info.magnification;
-        qc.pixelSizeNm       = qc.effectivePixelSizeNm();  // cameraPx / magnification
+        qc.magnification     = 1.0;
+        qc.pixelSizeNm       = info.cameraPxNm;             // effective = protocol pixelSize
         qc.maxSigmaNm        = info.initialSigmaPx * qc.pixelSizeNm * 3.0;
         qc.maxUncertaintyNm  = qc.pixelSizeNm / 4.0;
 

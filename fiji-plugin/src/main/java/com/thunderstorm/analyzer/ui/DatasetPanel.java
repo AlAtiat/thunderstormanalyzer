@@ -192,8 +192,13 @@ public class DatasetPanel extends JPanel {
         try {
             ProtocolParser.ProtocolInfo info = ProtocolParser.parse(protoFile.toPath());
             if (info.cameraPxNm > 0) {
+                // ThunderSTORM's cameraSettings.pixelSize is the EFFECTIVE pixel size at the
+                // sample (it already accounts for magnification). The Python reference
+                // (qc_from_protocol) treats it as effective with magnification = 1, so do the
+                // same here: effective pixel = pixelSize ÷ 1. (Manual entry still uses raw
+                // camera px ÷ objective magnification.)
                 cameraPxField.setText(String.format("%.1f", info.cameraPxNm));
-                magField.setText(String.format("%.1f", info.magnification));
+                magField.setText("1");
             }
             if (!Double.isNaN(info.filterIntensity))
                 minIntensityField.setText(String.format("%.0f", info.filterIntensity));

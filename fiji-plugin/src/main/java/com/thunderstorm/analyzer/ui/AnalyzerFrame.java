@@ -6,6 +6,7 @@ import com.thunderstorm.analyzer.model.PlotConfig;
 import com.thunderstorm.analyzer.pipeline.ProtocolParser;
 import com.thunderstorm.analyzer.runner.AnalysisRunner;
 import com.thunderstorm.analyzer.util.ResultsLoader.DatasetResult;
+import com.thunderstorm.analyzer.util.UpdateChecker;
 import ij.Prefs;
 import ij.WindowManager;
 
@@ -13,6 +14,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -36,6 +38,7 @@ public class AnalyzerFrame extends JFrame {
     private final JButton clearBtn       = new JButton("Clear All");
     private final JButton exportZipBtn   = new JButton("Export ZIP…");
     private final JButton openFolderBtn  = new JButton("Open Results Folder");
+    private final JButton checkUpdatesBtn = new JButton("Check for Updates");
     private final JLabel  statusLabel    = new JLabel("Status: Idle");
     private final JProgressBar progressBar = new JProgressBar();
 
@@ -108,6 +111,7 @@ public class AnalyzerFrame extends JFrame {
         clearBtn.addActionListener(e -> clearAll());
         exportZipBtn.addActionListener(e -> exportZip());
         openFolderBtn.addActionListener(e -> openFolder());
+        checkUpdatesBtn.addActionListener(e -> checkForUpdates());
 
         exportZipBtn.setEnabled(false);
         openFolderBtn.setEnabled(false);
@@ -120,7 +124,7 @@ public class AnalyzerFrame extends JFrame {
         p.setBorder(BorderFactory.createEmptyBorder(10, 8, 10, 8));
 
         Dimension btnSize = new Dimension(200, 32);
-        for (JButton btn : new JButton[]{addDatasetBtn, loadFijiBtn, runBtn, clearBtn, exportZipBtn, openFolderBtn}) {
+        for (JButton btn : new JButton[]{addDatasetBtn, loadFijiBtn, runBtn, clearBtn, exportZipBtn, openFolderBtn, checkUpdatesBtn}) {
             btn.setMaximumSize(btnSize);
             btn.setAlignmentX(Component.LEFT_ALIGNMENT);
             p.add(btn);
@@ -138,7 +142,7 @@ public class AnalyzerFrame extends JFrame {
         p.add(progressBar);
         p.add(Box.createVerticalGlue());
 
-        JLabel version = new JLabel("ThunderSTORM Analyzer v1.0");
+        JLabel version = new JLabel("ThunderSTORM Analyzer v" + UpdateChecker.currentVersion());
         version.setForeground(Color.GRAY);
         version.setFont(version.getFont().deriveFont(10f));
         version.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -414,6 +418,57 @@ public class AnalyzerFrame extends JFrame {
         catch (IOException ex) {
             JOptionPane.showMessageDialog(this, "Cannot open folder:\n" + ex.getMessage());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Check for updates (manual — GitHub Releases, on a background thread)
+    // -----------------------------------------------------------------------
+    private void checkForUpdates() {
+        checkUpdatesBtn.setEnabled(false);
+        new SwingWorker<UpdateChecker.Result, Void>() {
+            protected UpdateChecker.Result doInBackground() {
+                return UpdateChecker.check();
+            }
+            protected void done() {
+                checkUpdatesBtn.setEnabled(true);
+                UpdateChecker.Result r;
+                try {
+                    r = get();
+                } catch (Exception ex) {
+                    showInfo("Couldn't check for updates:\n" + ex.getMessage(),
+                        JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                if (r.error != null) {
+                    showInfo("Couldn't reach the update server.\n"
+                        + "Check your internet connection and try again.",
+                        JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                if (!r.updateAvailable) {
+                    showInfo("You're up to date.\nInstalled version: " + r.currentVersion,
+                        JOptionPane.INFORMATION_MESSAGE);
+                    return;
+                }
+                String latest = r.latestTag != null ? r.latestTag.replaceFirst("^[vV]", "") : "?";
+                int choice = JOptionPane.showConfirmDialog(AnalyzerFrame.this,
+                    "Version " + latest + " is available (you have " + r.currentVersion + ").\n\n"
+                        + "Open the download page?",
+                    "Update Available", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+                if (choice == JOptionPane.YES_OPTION) {
+                    try {
+                        Desktop.getDesktop().browse(new URI(r.htmlUrl));
+                    } catch (Exception ex) {
+                        showInfo("Couldn't open the browser. Visit:\n" + r.htmlUrl,
+                            JOptionPane.INFORMATION_MESSAGE);
+                    }
+                }
+            }
+        }.execute();
+    }
+
+    private void showInfo(String message, int messageType) {
+        JOptionPane.showMessageDialog(this, message, "Check for Updates", messageType);
     }
 
     // -----------------------------------------------------------------------

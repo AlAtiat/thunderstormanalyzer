@@ -2,7 +2,7 @@
 [tool.briefcase]
 project_name = "ThunderSTORM Origami Analyzer"
 bundle = "com.thunderstormanalyzer"
-version = "0.0.1"
+version = "0.0.2"
 url = "https://github.com/AlAtiat/thunderstormanalyzer"
 license.file = "LICENSE"
 author = "Aun Al Atiat"
@@ -47,7 +47,6 @@ requires = [
     "pandas",
     "scikit-learn",
     "scipy",
-    "plotly",
 
 ]
 test_requires = [

@@ -1,5 +1,13 @@
 # ThunderSTORMAnalyzer Release Notes
 
+
+## 0.0.2 (22 Jun 2026)
+
+* splash startup (splash shows before heavy libraries load).
+* Fiji plugin: min-blink-cycles / min-active-frames now affect detection.
+* Check for updates
+
+
 ## 0.0.1 (05 May 2026)
 
 * Initial release

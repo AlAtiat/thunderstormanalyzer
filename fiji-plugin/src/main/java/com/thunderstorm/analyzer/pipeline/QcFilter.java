@@ -85,15 +85,18 @@ public class QcFilter {
         fd.sigma = s2; fd.frame = f2; fd.bkgstd = b2;
         fd.intensity3sigmaLo = lo; fd.intensity3sigmaHi = hi;
 
-        // Stats on the final filtered set
-        fd.meanUncertainty   = mean(u2);
-        fd.medianUncertainty = median(u2);
-        fd.stdUncertainty    = std(u2, fd.meanUncertainty);
-        fd.meanSigma         = mean(s2);
-        fd.medianSigma       = median(s2);
-        fd.meanIntensity     = mean(i2);
-        fd.medianIntensity   = median(i2);
-        fd.meanBkgstd        = mean(b2);
+        // Summary stats are reported on the QC-filtered (pre-3σ) population — matching the
+        // Python reference, which computes uncertainty/sigma/intensity stats on the filtered
+        // set before the 3σ intensity cut. (The 3σ arrays above still drive rendering/NND/
+        // clustering downstream.)
+        fd.meanUncertainty   = mean(u1);
+        fd.medianUncertainty = median(u1);
+        fd.stdUncertainty    = std(u1, fd.meanUncertainty);
+        fd.meanSigma         = mean(s1);
+        fd.medianSigma       = median(s1);
+        fd.meanIntensity     = mean(i1);
+        fd.medianIntensity   = median(i1);
+        fd.meanBkgstd        = mean(b1);
 
         return fd;
     }

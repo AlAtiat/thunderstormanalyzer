@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Callable
 
 from .models import AnalysisResult, ColumnConfig, DatasetEntry, PlotConfig
-from .pipeline import analyze_entry, generate_comparison
 
 
 class AnalysisRunner:
@@ -37,6 +36,10 @@ class AnalysisRunner:
             plot_config = PlotConfig()
 
         def _worker() -> None:
+            # Heavy imports (locan, matplotlib, numpy, pandas via .pipeline) happen here,
+            # on the background thread, so the GUI never blocks on first analysis.
+            from .pipeline import analyze_entry, generate_comparison
+
             results: list[AnalysisResult] = []
             for entry in datasets:
                 try:

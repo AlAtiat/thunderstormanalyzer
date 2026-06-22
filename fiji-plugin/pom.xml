@@ -7,7 +7,7 @@
 
     <groupId>com.thunderstorm</groupId>
     <artifactId>thunderstorm-analyzer</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <packaging>jar</packaging>
 
     <name>ThunderSTORM Origami Analyzer</name>
@@ -104,6 +104,8 @@
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <manifestEntries>
                                         <Plugin-Class>${main-class}</Plugin-Class>
+                                        <Implementation-Title>ThunderSTORM Origami Analyzer</Implementation-Title>
+                                        <Implementation-Version>${project.version}</Implementation-Version>
                                     </manifestEntries>
                                 </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>

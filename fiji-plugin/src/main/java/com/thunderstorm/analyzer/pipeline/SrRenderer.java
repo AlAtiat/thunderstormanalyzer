@@ -99,12 +99,14 @@ public class SrRenderer {
         int[] mapped = new int[total];
         if (nonZeroStart == sorted.length) return mapped; // all zero
 
+        int denom = total - nonZeroStart - 1;   // guard: 0 when only one non-zero bin
         for (int i = 0; i < total; i++) {
             if (grid[i] == 0) { mapped[i] = 0; continue; }
+            if (denom <= 0) { mapped[i] = 255; continue; }  // single non-zero bin → full intensity
             // Binary search rank
             int rank = upperBound(sorted, grid[i]);
             // Map rank to [1, 255]
-            int v = 1 + (int)(254.0 * (rank - nonZeroStart) / (total - nonZeroStart - 1));
+            int v = 1 + (int)(254.0 * (rank - nonZeroStart) / denom);
             mapped[i] = Math.min(255, Math.max(1, v));
         }
         return mapped;

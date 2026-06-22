@@ -118,7 +118,7 @@ public class AnalysisPipeline {
                     BlinkingScorer.ClusterScore[] scores = BlinkingScorer.scoreAll(
                         fd.x, fd.y, fd.intensity, fd.frame,
                         clr.labels, clr.nClusters,
-                        qc.blinkGapFrames, totalFrames);
+                        qc.blinkGapFrames, qc.minBlinkCycles, qc.minBlinkFrames, totalFrames);
                     result.clusterScores = scores;
 
                     log.accept("  Finding structures (nSpots=" + nSpots + ")...");
