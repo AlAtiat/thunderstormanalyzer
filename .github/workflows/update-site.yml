@@ -1,0 +1,53 @@
+# ImageJ / Fiji update-site publisher — SCAFFOLD (manual trigger only).
+#
+# This is the future auto-update path for the Fiji plugin (Help > Update). It is
+# workflow_dispatch-only so it never runs by accident, and the publish steps are
+# marked TODO because an ImageJ update site needs a ONE-TIME MANUAL BOOTSTRAP that
+# cannot be done cold in CI (see docs/UPDATE_SITE.md). Until that bootstrap + GitHub
+# Pages are set up, the working update path is the in-plugin "Check for Updates" button.
+
+name: Publish Fiji update site (scaffold)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed later to push the generated site to the gh-pages branch
+
+jobs:
+  publish-update-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build plugin jar
+        run: mvn -B -ntp -DskipTests -f fiji-plugin/pom.xml package
+
+      # --- The steps below require the one-time bootstrap in docs/UPDATE_SITE.md ---
+
+      - name: Download headless Fiji
+        run: |
+          echo "TODO: download + extract Fiji to ./Fiji.app"
+          echo "e.g. curl -L https://downloads.imagej.net/fiji/latest/fiji-linux64.zip -o fiji.zip && unzip -q fiji.zip"
+
+      - name: Refresh update site (db.xml.gz)
+        run: |
+          echo "TODO: copy fiji-plugin/target/thunderstorm-analyzer-*.jar into Fiji.app/plugins/"
+          echo "TODO: run the ImageJ updater to (re)generate the update site, e.g.:"
+          echo "  ./Fiji.app/ImageJ-linux64 --headless --update edit-update-site \\"
+          echo "    'ThunderSTORM Origami Analyzer' 'https://alatiat.github.io/thunderstormanalyzer/'"
+          echo "  ./Fiji.app/ImageJ-linux64 --headless --update upload-complete-site --force-shadow 'ThunderSTORM Origami Analyzer'"
+          echo "  (for a static GitHub Pages host, generate the site into ./site instead of WebDAV upload)"
+
+      - name: Publish site to GitHub Pages
+        run: |
+          echo "TODO: deploy ./site to the gh-pages branch (e.g. peaceiris/actions-gh-pages@v4)"
+          echo "TODO: enable Settings > Pages > Source: gh-pages, then verify"
+          echo "      https://alatiat.github.io/thunderstormanalyzer/db.xml.gz is reachable."

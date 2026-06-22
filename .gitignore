@@ -66,6 +66,7 @@ logs/
 
 *.tex
 .*/
+!.github/
 figures/
 
 # Java / Maven (fiji-plugin)
