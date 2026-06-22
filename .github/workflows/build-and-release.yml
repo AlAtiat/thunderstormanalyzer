@@ -1,0 +1,249 @@
+name: Build and Release ThunderSTORM Origami Analyzer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve versions from the project files (NOT from the git tag).
+  #   app_version    <- pyproject.toml  [tool.briefcase] version
+  #   plugin_version <- fiji-plugin/pom.xml  <version>
+  # ---------------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.v.outputs.app_version }}
+      plugin_version: ${{ steps.v.outputs.plugin_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read app + plugin versions
+        id: v
+        shell: bash
+        run: |
+          APP_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['tool']['briefcase']['version'])")
+          PLUGIN_VERSION=$(python -c "import xml.etree.ElementTree as ET; r=ET.parse('fiji-plugin/pom.xml').getroot(); ns={'m':'http://maven.apache.org/POM/4.0.0'}; e=r.find('m:version', ns); print((e.text or '').strip() if e is not None else '')")
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved app_version=$APP_VERSION  plugin_version=$PLUGIN_VERSION"
+
+  # ---------------------------------------------------------------------------
+  # Build the BeeWare/Briefcase desktop app for every desktop platform.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: thunderstormanalyzer-windows
+          - os: macos-15
+            artifact-name: thunderstormanalyzer-macos-arm64
+            arch-suffix: arm64
+          - os: macos-15-intel
+            artifact-name: thunderstormanalyzer-macos-x86_64
+            arch-suffix: x86_64
+          - os: ubuntu-latest
+            artifact-name: thunderstormanalyzer-linux-flatpak
+            build-target: flatpak
+          - os: ubuntu-latest
+            artifact-name: thunderstormanalyzer-linux-appimage
+            build-target: appimage
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Briefcase
+        run: |
+          python -m pip install -U pip
+          python -m pip install -U briefcase
+
+      - name: Install Linux system dependencies (Flatpak)
+        if: runner.os == 'Linux' && matrix.build-target == 'flatpak'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      # --- Create ---
+      - name: Create (Linux)
+        if: runner.os == 'Linux'
+        run: briefcase create linux ${{ matrix.build-target }}
+
+      - name: Create
+        if: runner.os != 'Linux'
+        run: briefcase create
+
+      # --- Build ---
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: briefcase build linux ${{ matrix.build-target }}
+
+      - name: Build
+        if: runner.os != 'Linux'
+        run: briefcase build
+
+      # --- Package ---
+      - name: Package (macOS — ad-hoc sign, no Apple certificate required)
+        if: runner.os == 'macOS'
+        run: briefcase package --adhoc-sign
+
+      - name: Rename macOS DMG to stable architecture name
+        if: runner.os == 'macOS'
+        run: |
+          for f in dist/*.dmg; do
+            mv "$f" "dist/ThunderSTORMAnalyzer-${{ matrix.arch-suffix }}.dmg"
+          done
+
+      - name: Package (Linux Flatpak)
+        if: runner.os == 'Linux' && matrix.build-target == 'flatpak'
+        run: briefcase package linux flatpak
+
+      - name: Rename Linux Flatpak to stable name
+        if: runner.os == 'Linux' && matrix.build-target == 'flatpak'
+        run: |
+          for f in dist/*.flatpak; do
+            mv "$f" dist/ThunderSTORMAnalyzer.flatpak
+          done
+
+      - name: Package (Linux AppImage)
+        if: runner.os == 'Linux' && matrix.build-target == 'appimage'
+        run: briefcase package linux appimage
+
+      - name: Rename Linux AppImage to stable name
+        if: runner.os == 'Linux' && matrix.build-target == 'appimage'
+        run: |
+          for f in dist/*.AppImage; do
+            mv "$f" dist/ThunderSTORMAnalyzer.AppImage
+          done
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: briefcase package
+
+      - name: Rename Windows MSI to stable name
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msi = Get-Item dist\*.msi | Select-Object -First 1
+          Move-Item $msi.FullName dist\ThunderSTORMAnalyzer.msi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Build the ImageJ / Fiji plugin (shaded fat-jar) with Maven.
+  # ---------------------------------------------------------------------------
+  fiji-plugin:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build plugin jar
+        run: mvn -B -ntp -DskipTests -f fiji-plugin/pom.xml package
+
+      - name: Rename plugin jar to stable name
+        run: |
+          # Prefer the version-named jar; fall back to any non-"original-" shaded jar
+          # so a version bump in pom.xml can never break this step.
+          jar="fiji-plugin/target/thunderstorm-analyzer-${{ needs.version.outputs.plugin_version }}.jar"
+          if [ ! -f "$jar" ]; then
+            jar=$(ls fiji-plugin/target/*.jar | grep -v '/original-' | head -n1)
+          fi
+          echo "Selected jar: $jar"
+          cp "$jar" ThunderSTORMAnalyzer-Fiji-plugin.jar
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fiji-plugin
+          path: ThunderSTORMAnalyzer-Fiji-plugin.jar
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish a single GitHub Release (only on a v* tag push).
+  # The pushed tag MUST equal v<app_version from pyproject.toml>.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [version, build, fiji-plugin]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches pyproject version
+        shell: bash
+        run: |
+          EXPECTED="v${{ needs.version.outputs.app_version }}"
+          ACTUAL="${GITHUB_REF_NAME}"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::Tag '$ACTUAL' does not match pyproject version '$EXPECTED'."
+            echo "Bump [tool.briefcase] version in pyproject.toml to match the tag (or vice versa)."
+            exit 1
+          fi
+          echo "Tag matches pyproject version: $ACTUAL"
+
+      - name: Extract changelog for this version
+        shell: bash
+        run: |
+          VERSION="${{ needs.version.outputs.app_version }}"
+          awk -v ver="$VERSION" '
+            $0 ~ ("^##[[:space:]]+" ver "([^0-9].*)?$") {found=1; next}
+            found && /^## / {exit}
+            found {print}
+          ' CHANGELOG > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "See CHANGELOG for full details." > release_notes.md
+          fi
+          {
+            echo ""
+            echo "---"
+            echo "Bundled Fiji/ImageJ plugin: \`ThunderSTORMAnalyzer-Fiji-plugin.jar\` (v${{ needs.version.outputs.plugin_version }})"
+          } >> release_notes.md
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ThunderSTORM Origami Analyzer ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: release-assets/*
+          draft: false
+          prerelease: false
