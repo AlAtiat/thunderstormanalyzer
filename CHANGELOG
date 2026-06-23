@@ -1,5 +1,9 @@
 # ThunderSTORMAnalyzer Release Notes
 
+## 0.0.3 (23 Jun 2026)
+
+* matplotlib>=3.8,<3.11
+* wrapped histograms in try/except
 
 ## 0.0.2 (22 Jun 2026)
 

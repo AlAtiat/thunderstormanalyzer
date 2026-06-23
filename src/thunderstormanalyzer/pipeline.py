@@ -1214,15 +1214,19 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
     }
 
     if plot_config.histograms:
-        _plot_histogram(unc, "Localization uncertainty (nm)", "Count",
-                        out_dir / "uncertainty_hist.png", entry.name,
-                        annot_stats=unc)
-        _plot_histogram(intensity, "Intensity (photon)", "Count",
-                        out_dir / "intensity_hist.png", entry.name,
-                        annot_stats=intensity)
-        _plot_histogram(sigma, "PSF sigma (nm)", "Count",
-                        out_dir / "sigma_hist.png", entry.name,
-                        annot_stats=sigma)
+        try:
+            _plot_histogram(unc, "Localization uncertainty (nm)", "Count",
+                            out_dir / "uncertainty_hist.png", entry.name,
+                            annot_stats=unc)
+            _plot_histogram(intensity, "Intensity (photon)", "Count",
+                            out_dir / "intensity_hist.png", entry.name,
+                            annot_stats=intensity)
+            _plot_histogram(sigma, "PSF sigma (nm)", "Count",
+                            out_dir / "sigma_hist.png", entry.name,
+                            annot_stats=sigma)
+        except Exception as e:
+            plt.close("all")
+            log_fn(f"  [WARN] histograms failed for {entry.name}: {e}")
 
     locs_per_frame: list[int] = []
     if c.frame_col in df.columns:
@@ -1248,15 +1252,19 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
     pd.DataFrame({"sigma_nm": sigma.values}).to_csv(out_dir / "sigma_values.csv", index=False)
 
     if plot_config.histograms:
-        _plot_histogram(df_3sigma[c.intensity_col], "Intensity (photon)", "Count",
-                        out_dir / "intensity_hist_3sigma.png", f"{entry.name} — 3σ subset",
-                        annot_stats=df_3sigma[c.intensity_col])
-        _plot_histogram(df_3sigma[c.uncertainty_col], "Localization uncertainty (nm)", "Count",
-                        out_dir / "uncertainty_hist_3sigma.png", f"{entry.name} — 3σ subset",
-                        annot_stats=df_3sigma[c.uncertainty_col])
-        _plot_histogram(df_3sigma[c.sigma_col], "PSF sigma (nm)", "Count",
-                        out_dir / "sigma_hist_3sigma.png", f"{entry.name} — 3σ subset",
-                        annot_stats=df_3sigma[c.sigma_col])
+        try:
+            _plot_histogram(df_3sigma[c.intensity_col], "Intensity (photon)", "Count",
+                            out_dir / "intensity_hist_3sigma.png", f"{entry.name} — 3σ subset",
+                            annot_stats=df_3sigma[c.intensity_col])
+            _plot_histogram(df_3sigma[c.uncertainty_col], "Localization uncertainty (nm)", "Count",
+                            out_dir / "uncertainty_hist_3sigma.png", f"{entry.name} — 3σ subset",
+                            annot_stats=df_3sigma[c.uncertainty_col])
+            _plot_histogram(df_3sigma[c.sigma_col], "PSF sigma (nm)", "Count",
+                            out_dir / "sigma_hist_3sigma.png", f"{entry.name} — 3σ subset",
+                            annot_stats=df_3sigma[c.sigma_col])
+        except Exception as e:
+            plt.close("all")
+            log_fn(f"  [WARN] 3σ histograms failed for {entry.name}: {e}")
 
     if plot_config.superres_render:
         _render_with_fallback(lc, locs, out_dir / "superres_render.png", entry.name, log_fn)

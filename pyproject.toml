@@ -2,7 +2,7 @@
 [tool.briefcase]
 project_name = "ThunderSTORM Origami Analyzer"
 bundle = "com.thunderstormanalyzer"
-version = "0.0.2"
+version = "0.0.3"
 url = "https://github.com/AlAtiat/thunderstormanalyzer"
 license.file = "LICENSE"
 author = "Aun Al Atiat"
@@ -42,7 +42,7 @@ test_sources = [
 
 requires = [
     "locan>=0.21.0",
-    "matplotlib",
+    "matplotlib>=3.8,<3.11",
     "numpy",
     "pandas",
     "scikit-learn",
