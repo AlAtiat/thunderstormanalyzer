@@ -76,3 +76,4 @@ dependency-reduced-pom.xml
 *.jar
 fiji-plugin/README.md
 dev/
+resources/ThunderstormAnalyzer/
