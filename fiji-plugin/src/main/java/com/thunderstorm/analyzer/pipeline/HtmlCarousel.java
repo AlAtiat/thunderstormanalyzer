@@ -21,7 +21,7 @@ import java.util.List;
 public class HtmlCarousel {
 
     /**
-     * @param triplets   detected structures (already sorted by score desc)
+     * @param structures   detected structures (already sorted by score desc)
      * @param x          all localisation x coords (nm)
      * @param y          all localisation y coords (nm)
      * @param frame      all frame numbers
@@ -31,36 +31,39 @@ public class HtmlCarousel {
      * @param binSizeNm  SR bin size (nm)
      * @param outputDir  where to write structure_carousel.html
      */
-    public static void write(List<TripletDetector.Triplet> triplets,
+    public static void write(List<StructureDetector.Structure> structures,
                              double[] x, double[] y, double[] frame,
                              double[] intensity, int[] labels,
                              BufferedImage srFull,
                              double binSizeNm,
+                             double spacingNm, double spacingTolNm,
                              Path outputDir) throws IOException {
 
         StringBuilder slides = new StringBuilder();
-        for (int ti = 0; ti < triplets.size(); ti++) {
-            TripletDetector.Triplet t = triplets.get(ti);
-            slides.append(buildSlide(ti, t, x, y, frame, intensity, labels, srFull, binSizeNm));
+        for (int ti = 0; ti < structures.size(); ti++) {
+            StructureDetector.Structure t = structures.get(ti);
+            slides.append(buildSlide(ti, t, x, y, frame, intensity, labels, srFull, binSizeNm,
+                spacingNm, spacingTolNm));
         }
 
         String html = TEMPLATE
             .replace("{{SLIDES}}", slides.toString())
-            .replace("{{N}}", String.valueOf(triplets.size()));
+            .replace("{{N}}", String.valueOf(structures.size()));
 
         Path out = outputDir.resolve("structure_carousel.html");
         Files.writeString(out, html, StandardCharsets.UTF_8);
     }
 
-    private static String buildSlide(int idx, TripletDetector.Triplet t,
+    private static String buildSlide(int idx, StructureDetector.Structure t,
                                      double[] x, double[] y, double[] frame,
                                      double[] intensity, int[] labels,
-                                     BufferedImage srFull, double binSizeNm) throws IOException {
+                                     BufferedImage srFull, double binSizeNm,
+                                     double spacingNm, double spacingTolNm) throws IOException {
 
         // Build the showcase figure for this structure
         int nDots = t.clusterIds.length;
         BufferedImage showcase = buildShowcaseImage(t, x, y, frame, intensity, labels,
-            srFull, binSizeNm, "Structure #" + (idx + 1));
+            srFull, binSizeNm, spacingNm, spacingTolNm, "Structure #" + (idx + 1));
         String showcaseB64 = toBase64(showcase);
 
         // Per-spot blinking trace mini-charts — one per dot (N dots)
@@ -116,17 +119,18 @@ public class HtmlCarousel {
     }
 
     /** Renders the showcase figure via PlotWriter.writeBlinkingShowcase and returns it as a BufferedImage. */
-    private static BufferedImage buildShowcaseImage(TripletDetector.Triplet t,
+    private static BufferedImage buildShowcaseImage(StructureDetector.Structure t,
                                                     double[] allX, double[] allY,
                                                     double[] allFrames, double[] allIntensity,
                                                     int[] clusterLabels,
                                                     BufferedImage srFull, double binSizeNm,
+                                                    double spacingNm, double spacingTolNm,
                                                     String label) throws IOException {
         // Delegate to a temp file then return the image
         java.io.File tmp = java.io.File.createTempFile("tsa_showcase_", ".png");
         tmp.deleteOnExit();
         PlotWriter.writeBlinkingShowcase(srFull, allX, allY, t, allFrames, allIntensity,
-            clusterLabels, binSizeNm, label, tmp.toPath());
+            clusterLabels, binSizeNm, spacingNm, spacingTolNm, label, tmp.toPath());
         return ImageIO.read(tmp);
     }
 

@@ -44,10 +44,13 @@ public class SrRenderer {
      * @param x          x coords (nm)
      * @param y          y coords (nm)
      * @param binSizeNm  histogram bin size in nm (e.g. 10 nm)
+     * @param baseNm     structure scale (spacing + tolerance) anchoring the scale bar;
+     *                   ≤0 falls back to a round ≈15 % of image width
      * @param out        output PNG path
      * @return           the rendered BufferedImage
      */
-    public static BufferedImage render(double[] x, double[] y, double binSizeNm, Path out)
+    public static BufferedImage render(double[] x, double[] y, double binSizeNm,
+                                       double baseNm, Path out)
             throws IOException {
         if (x.length == 0) return new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB);
 
@@ -84,8 +87,8 @@ public class SrRenderer {
             }
         }
 
-        // Scale bar: 15% of image width, rounded to nearest order-of-magnitude
-        drawScaleBar(img, binSizeNm, cols);
+        // Scale bar anchored to the structure scale (spacing + tolerance).
+        drawScaleBar(img, binSizeNm, cols, baseNm);
 
         if (out != null) ImageIO.write(img, "PNG", out.toFile());
         return img;
@@ -121,14 +124,17 @@ public class SrRenderer {
         return lo;
     }
 
-    private static void drawScaleBar(BufferedImage img, double binSizeNm, int cols) {
-        int barPx = (int)(cols * 0.15);
-        double barNm = barPx * binSizeNm;
-        // Round to nearest power-of-10 * (1, 2, 5)
-        double mag = Math.pow(10, Math.floor(Math.log10(barNm)));
-        double[] candidates = { mag, 2*mag, 5*mag, 10*mag };
-        double best = mag;
-        for (double c : candidates) if (Math.abs(c - barNm) < Math.abs(best - barNm)) best = c;
+    private static void drawScaleBar(BufferedImage img, double binSizeNm, int cols, double baseNm) {
+        double fieldWidthNm = cols * binSizeNm;
+        double best = niceScaleBarNm(fieldWidthNm, baseNm);
+        if (best <= 0) {
+            // Fallback: round 15 % of width to nearest power-of-10 * (1, 2, 5).
+            double barNm = (cols * 0.15) * binSizeNm;
+            double mag = Math.pow(10, Math.floor(Math.log10(barNm)));
+            double[] candidates = { mag, 2*mag, 5*mag, 10*mag };
+            best = mag;
+            for (double c : candidates) if (Math.abs(c - barNm) < Math.abs(best - barNm)) best = c;
+        }
         int finalBarPx = (int)(best / binSizeNm);
 
         int h = img.getHeight();
@@ -137,9 +143,28 @@ public class SrRenderer {
         int margin = 10, thickness = 4;
         g.fillRect(cols - margin - finalBarPx, h - margin - thickness, finalBarPx, thickness);
         g.setFont(new Font("SansSerif", Font.PLAIN, 10));
-        String label = best >= 1000 ? String.format("%.0f µm", best/1000) : String.format("%.0f nm", best);
-        g.drawString(label, cols - margin - finalBarPx, h - margin - thickness - 2);
+        g.drawString(scaleBarLabel(best), cols - margin - finalBarPx, h - margin - thickness - 2);
         g.dispose();
+    }
+
+    /**
+     * Scale-bar length (nm) anchored to the structure scale {@code baseNm} (spacing + tol).
+     * Small fields use exactly {@code baseNm}; wide fields grow to the smallest round
+     * multiple k×baseNm (k ∈ 1,2,5,10,…) reaching ~12 % of the field width. Returns 0 when
+     * {@code baseNm} is missing/non-positive so the caller falls back to its old logic.
+     */
+    public static double niceScaleBarNm(double fieldWidthNm, double baseNm) {
+        if (!(baseNm > 0) || Double.isInfinite(baseNm)) return 0;
+        double target = 0.12 * fieldWidthNm;
+        if (baseNm >= target) return baseNm;
+        int[] ks = { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000 };
+        for (int k : ks) if (k * baseNm >= target) return k * baseNm;
+        return 1000 * baseNm;
+    }
+
+    /** Format a scale-bar length in nm, switching to µm at/above 1000 nm. */
+    public static String scaleBarLabel(double nm) {
+        return nm >= 1000 ? String.format("%.0f µm", nm / 1000) : String.format("%.0f nm", nm);
     }
 
     private static double min(double[] a) { double m = a[0]; for (double v : a) if (v < m) m = v; return m; }

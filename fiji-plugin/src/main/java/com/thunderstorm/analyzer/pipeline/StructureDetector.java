@@ -9,11 +9,11 @@ import java.util.stream.Collectors;
 /**
  * Detects DNA origami structures (N collinear dots) from DBSCAN cluster scores.
  * Supports any N ≥ 2 via a recursive chain-extension algorithm.
- * Default N = 3 (triplet). N = 2 = dimer (pair), N = 4 = tetramer, etc.
+ * N = 2 = dimer (pair), N = 3 = triplet, N = 4 = tetramer, etc.
  */
-public class TripletDetector {
+public class StructureDetector {
 
-    public static class Triplet {
+    public static class Structure {
         public int[] clusterIds;                        // N cluster ids, ordered along axis
         public double[] centreX;                        // cluster centroid x (nm)
         public double[] centreY;                        // cluster centroid y (nm)
@@ -36,7 +36,7 @@ public class TripletDetector {
      * @param maxStructures cap on returned structures
      * @param nSpots       dots per origami structure (≥ 2; default 3)
      */
-    public static List<Triplet> find(double[] x, double[] y, int[] labels,
+    public static List<Structure> find(double[] x, double[] y, int[] labels,
                                      BlinkingScorer.ClusterScore[] scores,
                                      double spacingNm, double spacingTolNm,
                                      double angleTolDeg, int maxStructures, int nSpots) {
@@ -71,7 +71,7 @@ public class TripletDetector {
         double hi = spacingNm + spacingTolNm;
 
         double angleTolRad = Math.toRadians(angleTolDeg);
-        List<Triplet> result = new ArrayList<>();
+        List<Structure> result = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
         for (int i = 0; i < nClusters && result.size() < maxStructures * 3; i++) {
@@ -112,7 +112,7 @@ public class TripletDetector {
                                     NndAnalyzer.KDNode centTree,
                                     Map<Integer, BlinkingScorer.ClusterScore> scoreMap,
                                     Set<String> seen,
-                                    List<Triplet> result) {
+                                    List<Structure> result) {
         int depth = chain.length;  // number of dots placed so far
 
         if (depth == nSpots) {
@@ -175,7 +175,7 @@ public class TripletDetector {
     private static void acceptChain(int[] chain, double meanSpacing, double maxAngleRad,
                                     double[] cx, double[] cy,
                                     Map<Integer, BlinkingScorer.ClusterScore> scoreMap,
-                                    Set<String> seen, List<Triplet> result) {
+                                    Set<String> seen, List<Structure> result) {
         // Deduplication key: sorted ids joined by "_"
         int[] sorted = chain.clone();
         Arrays.sort(sorted);
@@ -200,7 +200,7 @@ public class TripletDetector {
         double qualSum    = Arrays.stream(clScores).mapToDouble(s -> s.score).sum();
         double structScore = minCycles * minCycles * meanCycles * qualSum;
 
-        Triplet t = new Triplet();
+        Structure t = new Structure();
         t.clusterIds   = ordered;
         t.centreX      = Arrays.stream(ordered).mapToDouble(id -> cx[id]).toArray();
         t.centreY      = Arrays.stream(ordered).mapToDouble(id -> cy[id]).toArray();

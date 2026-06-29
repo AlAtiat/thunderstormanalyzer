@@ -25,15 +25,18 @@ public class ConfigPanel extends JPanel {
 
     // --- Origami detection ---
     private final JTextField nSpotsField      = new JTextField("3",  6);
-    private final JTextField maxTripletsField = new JTextField("10", 6);
+    private final JTextField maxStructuresField = new JTextField("10", 6);
 
     // --- Advanced blinking ---
     private final JTextField minCyclesField = new JTextField("2",    6);
     private final JTextField minFramesField = new JTextField("5",    6);
     private final JTextField blinkGapField  = new JTextField("2",    6);
     private final JTextField minLocsField   = new JTextField("3",    6);
-    private final JTextField binSizeField   = new JTextField("20",   6);
     private final JTextField angleField     = new JTextField("30.0", 6);
+
+    // --- Intensity calibration ---
+    private final JCheckBox realCalibCheck =
+        new JCheckBox("Real calibration (intensity is photons)", false);
 
     // --- Plot toggles ---
     private final JCheckBox histCheck    = new JCheckBox("Histograms",                      true);
@@ -81,15 +84,15 @@ public class ConfigPanel extends JPanel {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 4));
         p.setBorder(new TitledBorder("Structure Detection"));
         nSpotsField.setToolTipText(
-            "Number of fluorescent dots per DNA origami structure. Default is 3 (triplet).");
-        maxTripletsField.setToolTipText(
+            "Number of fluorescent dots per DNA origami structure (2 = dimer, 3 = triplet, 4 = tetramer, …).");
+        maxStructuresField.setToolTipText(
             "Maximum number of detected structures shown in the HTML carousel and showcase image.");
         JLabel nSpotsLabel = new JLabel("Dots per structure:");
         nSpotsLabel.setToolTipText(nSpotsField.getToolTipText());
         JLabel maxLabel = new JLabel("Max structures to show:");
-        maxLabel.setToolTipText(maxTripletsField.getToolTipText());
+        maxLabel.setToolTipText(maxStructuresField.getToolTipText());
         p.add(nSpotsLabel);    p.add(nSpotsField);
-        p.add(maxLabel);       p.add(maxTripletsField);
+        p.add(maxLabel);       p.add(maxStructuresField);
         return p;
     }
 
@@ -107,19 +110,25 @@ public class ConfigPanel extends JPanel {
         minLocsField.setToolTipText(
             "Minimum number of raw localisations grouped into one dot (DBSCAN min-samples). " +
             "Increase to reject noise; decrease to catch faint emitters.");
-        binSizeField.setToolTipText(
-            "Pixel size (nm) used when rendering the super-resolution image. " +
-            "Smaller = sharper but slower to render.");
         angleField.setToolTipText(
             "Maximum allowed deviation from a straight line (degrees) for a multi-dot " +
             "structure to be accepted as valid.");
+
+        // Note: the SR render bin size is derived per dataset from the dataset's
+        // Visualization magnification (Camera / Optics section), not set here.
+        realCalibCheck.setToolTipText(
+            "Off → intensity is shown as a.u. (uncalibrated, default). " +
+            "On → trusts that the data is photon-calibrated and labels/reports it as photons. " +
+            "Intensity values are never recomputed — this only affects labelling.");
 
         rowWithTip(p, gc, 0, "Min blink cycles:",       minCyclesField);
         rowWithTip(p, gc, 1, "Min active frames:",      minFramesField);
         rowWithTip(p, gc, 2, "Blink gap (frames):",     blinkGapField);
         rowWithTip(p, gc, 3, "Min detections per dot:", minLocsField);
-        rowWithTip(p, gc, 4, "SR image pixel size (nm):", binSizeField);
-        rowWithTip(p, gc, 5, "Max alignment error (°):", angleField);
+        rowWithTip(p, gc, 4, "Max alignment error (°):", angleField);
+        gc.gridx = 0; gc.gridy = 5; gc.gridwidth = 2; gc.fill = GridBagConstraints.NONE;
+        p.add(realCalibCheck, gc);
+        gc.gridwidth = 1;
         return p;
     }
 
@@ -188,10 +197,10 @@ public class ConfigPanel extends JPanel {
     public int    getMinFrames()   { return parseInt(minFramesField, 5); }
     public int    getBlinkGap()    { return parseInt(blinkGapField,  2); }
     public int    getMinLocs()     { return parseInt(minLocsField,   3); }
-    public int    getBinSize()     { return parseInt(binSizeField,  20); }
     public double getAngle()       { return parseDouble(angleField, 30.0); }
     public int    getNSpots()      { return parseInt(nSpotsField,    3); }
-    public int    getMaxTriplets() { return parseInt(maxTripletsField, 10); }
+    public int    getMaxStructures() { return parseInt(maxStructuresField, 10); }
+    public boolean isRealCalibration() { return realCalibCheck.isSelected(); }
 
     private int parseInt(JTextField f, int def) {
         try { return Integer.parseInt(f.getText().trim()); } catch (NumberFormatException e) { return def; }

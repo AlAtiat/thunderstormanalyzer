@@ -7,7 +7,6 @@ import shutil
 import sys
 import tempfile
 import threading
-import warnings
 from pathlib import Path
 
 import toga
@@ -37,6 +36,9 @@ class DatasetRow(toga.Box):
         self._protocol_path: Path | None = None
         self._dialog_open: bool = False
         self._csv_format: str = "thunderstorm"
+        # Guard: while we write the auto bin into qc_bin_size, its on_change must not
+        # re-trigger the recompute (would recurse). Set True around the programmatic write.
+        self._syncing_bin: bool = False
 
 
 
@@ -71,19 +73,38 @@ class DatasetRow(toga.Box):
         optics_header = toga.Label("Camera / Optics", style=Pack(
             color="#1565C0", font_size=10, margin_top=6, margin_bottom=4))
 
-        optics_row = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
-        optics_row.add(toga.Label("Camera pixel (nm):", style=lbl_style))
+        # Optics fields stacked 2×2: (Camera px, Objective mag) over (Visualization mag, Bin size).
+        optics_row1 = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
+        optics_row1.add(toga.Label("Camera pixel size (nm):", style=lbl_style))
         self.qc_camera_px = toga.TextInput(value="6500", style=Pack(width=65),
                                             on_change=self._update_pixel_size_label)
-        optics_row.add(self.qc_camera_px)
-        optics_row.add(toga.Label("  Magnification (×):", style=lbl_style))
+        optics_row1.add(self.qc_camera_px)
+        # Objective magnification (physical) → sets the effective pixel size.
+        optics_row1.add(toga.Label("  Objective mag (×):", style=lbl_style))
         self.qc_magnification = toga.TextInput(value="100", style=Pack(width=65),
                                                on_change=self._update_pixel_size_label)
-        optics_row.add(self.qc_magnification)
+        optics_row1.add(self.qc_magnification)
+
+        optics_row2 = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
+        # Visualization magnification (render up-sampling) → feeds the SR bin size.
+        optics_row2.add(toga.Label("Visualization mag (×):", style=lbl_style))
+        self.qc_visualization_mag = toga.TextInput(value="5", style=Pack(width=65),
+                                                    on_change=self._update_pixel_size_label)
+        optics_row2.add(self.qc_visualization_mag)
+        # SR render bin: shows the live auto value (effective px ÷ visualization mag).
+        # Its on_change only refreshes the summary label from whatever is typed — it never
+        # recomputes/overwrites the field, so a manual value is not clobbered. The other
+        # optics fields (camera/obj/vis) drive the auto-recompute that DOES write this field.
+        optics_row2.add(toga.Label("  Bin size (nm):", style=lbl_style))
+        self.qc_bin_size = toga.TextInput(value="", style=Pack(width=65),
+                                          on_change=self._update_bin_label_from_field)
+        optics_row2.add(self.qc_bin_size)
 
         px_label_row = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
-        self.effective_px_label = toga.Label("Effective pixel size: 65.00 nm/px",  # 6500 nm / 100×
-                                              style=Pack(color="#1565C0", font_size=9, flex=1))
+        # effective pixel = camera ÷ objective mag;  render bin = effective ÷ visualization mag
+        self.effective_px_label = toga.Label(
+            "Effective pixel: 65.00 nm/px   ·   Render bin: 13.0 nm",
+            style=Pack(color="#1565C0", font_size=9, flex=1))
         px_label_row.add(self.effective_px_label)
 
         # QC parameters
@@ -103,17 +124,11 @@ class DatasetRow(toga.Box):
         self.qc_min_intensity = toga.TextInput(value="1000.0", style=Pack(width=65))
         qc_row2.add(self.qc_min_intensity)
 
-        qc_row3 = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
-        qc_row3.add(toga.Label("NND target (nm):", style=lbl_style))
-        self.qc_nnd_target = toga.TextInput(value="80.0", style=Pack(width=65))
-        qc_row3.add(self.qc_nnd_target)
-        qc_row3.add(toga.Label("  NND tol (nm):", style=lbl_style))
-        self.qc_nnd_tol = toga.TextInput(value="20.0", style=Pack(width=65))
-        qc_row3.add(self.qc_nnd_tol)
-
+        # One spacing value drives BOTH the structure geometry and the NND-target band.
         qc_row4 = toga.Box(style=Pack(direction=ROW, margin_bottom=4))
-        qc_row4.add(toga.Label("Spacing (nm):", style=lbl_style))
-        self.qc_spacing = toga.TextInput(value="80.0", style=Pack(width=65))
+        qc_row4.add(toga.Label("Spacing / NND (nm):", style=lbl_style))
+        self.qc_spacing = toga.TextInput(value="80.0", style=Pack(width=65),
+                                         on_change=self._update_pixel_size_label)
         qc_row4.add(self.qc_spacing)
         qc_row4.add(toga.Label("  Spacing tol (nm):", style=lbl_style))
         self.qc_spacing_tol = toga.TextInput(value="20.0", style=Pack(width=65))
@@ -130,25 +145,104 @@ class DatasetRow(toga.Box):
         self.add(csv_row)
         self.add(proto_row)
         self.add(optics_header)
-        self.add(optics_row)
+        self.add(optics_row1)
+        self.add(optics_row2)
         self.add(px_label_row)
         self.add(qc_header)
         self.add(qc_row1)
         self.add(qc_row2)
-        self.add(qc_row3)
         self.add(qc_row4)
         self.add(remove_row)
         self.add(divider)
 
+        # Pre-fill the bin field with the live auto value before any user edit.
+        self._update_pixel_size_label()
+
     # ── Pixel size label ──────────────────────────────────────────────────────
 
     def _update_pixel_size_label(self, widget=None) -> None:
-        try:
-            nm = float(self.qc_camera_px.value) / float(self.qc_magnification.value)
-        except (ValueError, ZeroDivisionError):
-            self.effective_px_label.text = "Effective pixel size: — nm/px"
+        # Re-entrancy guard: writing the auto bin below triggers qc_bin_size.on_change,
+        # which calls this method again — ignore that programmatic echo.
+        if self._syncing_bin:
             return
-        self.effective_px_label.text = f"Effective pixel size: {nm:.2f} nm/px"
+        try:
+            eff = float(self.qc_camera_px.value) / float(self.qc_magnification.value)
+            bin_nm = self._auto_bin(eff, self.qc_visualization_mag.value)
+            eff_text = f"Effective pixel: {eff:.2f} nm/px"
+        except (ValueError, ZeroDivisionError):
+            eff = None
+            bin_nm = None
+            eff_text = "Effective pixel: — nm/px"
+
+        def _set() -> None:
+            # "Always reflect inputs": overwrite the bin field with the fresh auto value
+            # (under the guard so this write doesn't recurse). A typed value is therefore
+            # transient — it is replaced on the next optics/spacing change, by design.
+            if bin_nm is not None:
+                self._syncing_bin = True
+                try:
+                    self.qc_bin_size.value = f"{bin_nm:.1f}"
+                finally:
+                    self._syncing_bin = False
+                self.effective_px_label.text = f"{eff_text}   ·   Render bin: {bin_nm:.1f} nm"
+            else:
+                self.effective_px_label.text = f"{eff_text}   ·   Render bin: — nm"
+        # Setting widgets relayouts the window, which would scroll the dataset list back
+        # to the top — keep the user's scroll position.
+        self._app._keep_scroll(_set)
+
+    def _update_bin_label_from_field(self, widget=None) -> None:
+        """Refresh the summary label from the bin field's current (possibly manual) value.
+
+        Label-only: never writes ``qc_bin_size`` (so a typed value is not clobbered). No-op
+        during the guarded auto-write, which sets the label itself in
+        ``_update_pixel_size_label``.
+        """
+        if self._syncing_bin:
+            return
+        try:
+            eff = float(self.qc_camera_px.value) / float(self.qc_magnification.value)
+            eff_text = f"Effective pixel: {eff:.2f} nm/px"
+            bin_nm = self._current_bin(eff)
+            text = f"{eff_text}   ·   Render bin: {bin_nm:.1f} nm"
+        except (ValueError, ZeroDivisionError):
+            text = "Effective pixel: — nm/px   ·   Render bin: — nm"
+        self._app._keep_scroll(
+            lambda: setattr(self.effective_px_label, "text", text))
+
+    @staticmethod
+    def _auto_bin(effective_px_nm: float, vis_mag_value) -> float:
+        """Auto SR render bin size = effective pixel ÷ visualization magnification.
+
+        This is ThunderSTORM's standard render bin. For coarser/smoother dots lower the
+        visualization magnification (a smaller vis mag → larger bin). Floored at 1 nm to
+        avoid absurdly fine/slow renders; falls back to 20 nm when the magnification is
+        missing/non-positive or the result is not a finite positive number.
+        """
+        try:
+            vis = float(vis_mag_value)
+            bin_nm = effective_px_nm / vis
+            if vis > 0 and bin_nm > 0 and bin_nm != float("inf"):
+                return max(1.0, bin_nm)
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+        return 20.0
+
+    def _current_bin(self, effective_px_nm: float) -> float:
+        """The bin size to run with: the value shown in the field, else the auto value.
+
+        The field normally mirrors ``_auto_bin``; this also honours a manual edit that
+        hasn't been overwritten by a later optics change yet.
+        """
+        raw = (self.qc_bin_size.value or "").strip()
+        if raw:
+            try:
+                val = float(raw)
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+        return self._auto_bin(effective_px_nm, self.qc_visualization_mag.value)
 
     # ── File browsers ─────────────────────────────────────────────────────────
 
@@ -167,19 +261,96 @@ class DatasetRow(toga.Box):
         self._csv_path = Path(str(result))
         self.csv_label.text = self._csv_path.name
         self.csv_label.style.color = "#212121"
-        headers = self._read_locan_headers(self._csv_path)
+        # Read only the header row (off the UI thread) — fast, no locan, no full parse.
+        headers = await asyncio.to_thread(self._read_csv_headers, self._csv_path)
         self._csv_format = "thunderstorm"
         if headers:
             self._app._update_col_pickers(headers)
+        # Auto-fill Max sigma / Max uncertainty from the data's 95th percentile (off the
+        # UI thread, mirroring the Fiji plugin). Fields stay editable; they populate a
+        # moment after the dialog closes so browsing stays responsive on large files.
+        p95_sigma, p95_unc = await asyncio.to_thread(
+            self._scan_sigma_unc_p95, self._csv_path)
+        self._apply_p95(p95_sigma, p95_unc)
+
+    def _apply_p95(self, p95_sigma: float | None, p95_unc: float | None) -> None:
+        """Set Max sigma / Max uncertainty from the CSV's 95th percentiles (editable).
+
+        Only overwrites a field when its percentile is a positive number, so a missing
+        column or empty data leaves the existing value (protocol/default) untouched.
+        """
+        def _set() -> None:
+            if p95_sigma and p95_sigma > 0:
+                self.qc_max_sigma.value = f"{p95_sigma:.1f}"
+            if p95_unc and p95_unc > 0:
+                self.qc_max_unc.value = f"{p95_unc:.1f}"
+        self._app._keep_scroll(_set)
 
     @staticmethod
-    def _read_locan_headers(path: Path) -> list[str]:
+    def _scan_sigma_unc_p95(path: Path) -> tuple[float | None, float | None]:
+        """Return the 95th percentile of the CSV's sigma and uncertainty columns.
+
+        Stdlib ``csv`` only (no ``locan`` / full LocData load). Columns are matched by
+        case-insensitive substring — "sigma" (excluding background_sigma / bkgstd) and
+        "uncertainty" — mirroring the Fiji plugin's ``autoFillFromCsv``. Returns
+        ``(None, None)`` on any error or when a column has no numeric data.
+        """
+        import csv
+
+        def _p95(values: list[float]) -> float | None:
+            if not values:
+                return None
+            values.sort()
+            idx = min(int(len(values) * 0.95), len(values) - 1)
+            return values[idx]
+
         try:
-            import locan as lc
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                locs = lc.load_thunderstorm_file(str(path))
-            return list(locs.data.columns)
+            with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+                reader = csv.reader(fh)
+                header = next(reader, None)
+                if not header:
+                    return (None, None)
+                sigma_i = uncert_i = -1
+                for i, name in enumerate(header):
+                    low = name.strip().lower()
+                    if sigma_i < 0 and "sigma" in low and "background" not in low \
+                            and "bkgstd" not in low:
+                        sigma_i = i
+                    if uncert_i < 0 and "uncertainty" in low:
+                        uncert_i = i
+                if sigma_i < 0 and uncert_i < 0:
+                    return (None, None)
+                sigmas: list[float] = []
+                uncerts: list[float] = []
+                for row in reader:
+                    if 0 <= sigma_i < len(row):
+                        try:
+                            sigmas.append(float(row[sigma_i]))
+                        except ValueError:
+                            pass
+                    if 0 <= uncert_i < len(row):
+                        try:
+                            uncerts.append(float(row[uncert_i]))
+                        except ValueError:
+                            pass
+            return (_p95(sigmas), _p95(uncerts))
+        except Exception:
+            return (None, None)
+
+    @staticmethod
+    def _read_csv_headers(path: Path) -> list[str]:
+        """Read just the CSV header line and map to canonical names.
+
+        Uses only the stdlib ``csv`` module — no ``locan`` import and no full-file
+        parse — so browsing a large CSV is instant. The heavy ``locan`` load happens
+        later, on the analysis worker thread.
+        """
+        import csv
+        from .columns import canonical_headers
+        try:
+            with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+                first_row = next(csv.reader(fh), [])
+            return canonical_headers(first_row) if first_row else []
         except Exception:
             return []
 
@@ -211,13 +382,16 @@ class DatasetRow(toga.Box):
         if not protocol:
             return
         qc = qc_from_protocol(protocol)
-        # Camera pixel: protocol pixelSize is the effective pixel, so set camera=pixel, mag=1
-        self.qc_camera_px.value = f"{qc.pixel_size_nm:.1f}"
-        self.qc_magnification.value = "1"
-        self.qc_max_sigma.value = f"{qc.max_sigma_nm:.1f}"
-        self.qc_max_unc.value = f"{qc.max_uncertainty_nm:.1f}"
-        self.qc_min_intensity.value = f"{qc.min_intensity:.1f}"
-        self.effective_px_label.text = f"Effective pixel size: {qc.pixel_size_nm:.2f} nm/px (from protocol)"
+
+        def _set() -> None:
+            # Camera pixel: protocol pixelSize is the effective pixel, so camera=pixel, mag=1
+            self.qc_camera_px.value = f"{qc.pixel_size_nm:.1f}"
+            self.qc_magnification.value = "1"
+            self.qc_max_sigma.value = f"{qc.max_sigma_nm:.1f}"
+            self.qc_max_unc.value = f"{qc.max_uncertainty_nm:.1f}"
+            self.qc_min_intensity.value = f"{qc.min_intensity:.1f}"
+        self._app._keep_scroll(_set)
+        self._update_pixel_size_label()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -237,6 +411,8 @@ class DatasetRow(toga.Box):
             pixel_nm = d.pixel_size_nm
             cam_nm = d.camera_pixel_size_nm
             mag = d.magnification
+        vis_mag = self._float(self.qc_visualization_mag, d.visualization_magnification)
+        bin_nm = self._current_bin(pixel_nm)
         qc = QcParams(
             pixel_size_nm=pixel_nm,
             camera_pixel_size_nm=cam_nm,
@@ -244,10 +420,10 @@ class DatasetRow(toga.Box):
             max_sigma_nm=self._float(self.qc_max_sigma, d.max_sigma_nm),
             max_uncertainty_nm=self._float(self.qc_max_unc, d.max_uncertainty_nm),
             min_intensity=self._float(self.qc_min_intensity, d.min_intensity),
-            nnd_target_nm=self._float(self.qc_nnd_target, d.nnd_target_nm),
-            nnd_tolerance_nm=self._float(self.qc_nnd_tol, d.nnd_tolerance_nm),
             dna_origami_spacing_nm=self._float(self.qc_spacing, d.dna_origami_spacing_nm),
             spacing_tol_nm=self._float(self.qc_spacing_tol, d.spacing_tol_nm),
+            visualization_magnification=vis_mag,
+            render_bin_size_nm=bin_nm,
         )
         return DatasetEntry(
             name=self.name_input.value.strip() or "Unnamed",
@@ -339,13 +515,13 @@ class ThunderSTORMAnalyzer(toga.App):
             self._col_config = ColumnConfig()
             self._plot_config = PlotConfig()
             self._n_spots: int = 3
-            self._max_triplets: int = 10
+            self._max_structures: int = 10
             self._min_blink_cycles = 2
             self._min_blink_frames = 5
             self._blink_gap_frames = 2
             self._dbscan_min_samples = 3
-            self._render_bin_size_nm = 20
             self._collinear_angle_deg = 30.0
+            self._assume_photons = False
 
             # ── Sidebar ───────────────────────────────────────────────────────
             sidebar = toga.Box(style=Pack(direction=COLUMN, margin=12, width=200,
@@ -401,7 +577,7 @@ class ThunderSTORMAnalyzer(toga.App):
                                             style=Pack(color="#9e9e9e", margin=16))
             self.dataset_container.add(self._empty_label)
 
-            dataset_scroll = toga.ScrollContainer(
+            self._dataset_scroll = toga.ScrollContainer(
                 content=self.dataset_container,
                 style=Pack(flex=1, background_color="#fafafa"),
             )
@@ -413,7 +589,7 @@ class ThunderSTORMAnalyzer(toga.App):
             )
 
             datasets_tab = toga.Box(style=Pack(direction=COLUMN, flex=1))
-            datasets_tab.add(dataset_scroll)
+            datasets_tab.add(self._dataset_scroll)
             datasets_tab.add(self.log_area)
 
             # ── Results tab ───────────────────────────────────────────────────
@@ -499,12 +675,12 @@ class ThunderSTORMAnalyzer(toga.App):
         nspots_row.add(self._n_spots_input)
         box.add(nspots_row)
 
-        max_triplets_row = toga.Box(style=Pack(direction=ROW, margin_bottom=8))
-        max_triplets_row.add(toga.Label("Max triplet images to show:",
-                                        style=Pack(width=280, color="#212121", margin_right=8)))
-        self._max_triplets_input = toga.TextInput(value="10", style=Pack(width=60))
-        max_triplets_row.add(self._max_triplets_input)
-        box.add(max_triplets_row)
+        max_structures_row = toga.Box(style=Pack(direction=ROW, margin_bottom=8))
+        max_structures_row.add(toga.Label("Max structures to show:",
+                                          style=Pack(width=280, color="#212121", margin_right=8)))
+        self._max_structures_input = toga.TextInput(value="10", style=Pack(width=60))
+        max_structures_row.add(self._max_structures_input)
+        box.add(max_structures_row)
 
         box.add(toga.Label("─" * 80, style=Pack(color="#cccccc", margin_top=4, margin_bottom=8)))
         box.add(toga.Label("Advanced Detection Parameters",
@@ -534,14 +710,27 @@ class ThunderSTORMAnalyzer(toga.App):
         adv_row2.add(self._dbscan_min_samples_input)
         box.add(adv_row2)
 
+        # Render bin size is not set here — it is per dataset, auto-derived from each
+        # dataset's effective pixel, visualization magnification and spacing (and
+        # manually overridable) in that dataset's Camera / Optics section.
         adv_row3 = toga.Box(style=Pack(direction=ROW, margin_bottom=6))
-        adv_row3.add(toga.Label("Render bin size (nm):", style=adv_lbl))
-        self._render_bin_size_input = toga.TextInput(value="20", style=adv_inp)
-        adv_row3.add(self._render_bin_size_input)
-        adv_row3.add(toga.Label("  Collinear angle (°):", style=adv_lbl))
+        adv_row3.add(toga.Label("Collinear angle (°):", style=adv_lbl))
         self._collinear_angle_input = toga.TextInput(value="30.0", style=adv_inp)
         adv_row3.add(self._collinear_angle_input)
         box.add(adv_row3)
+
+        # Intensity calibration: the app reads the intensity column as-is (ThunderSTORM
+        # already applied/skipped the gain). Off → label intensity as a.u. (default);
+        # On → trust it is photon-calibrated and label/report it as photons.
+        calib_row = toga.Box(style=Pack(direction=ROW, margin_bottom=2))
+        self._assume_photons_switch = toga.Switch(
+            "Real calibration (intensity is photons)", value=False, style=Pack(flex=1))
+        calib_row.add(self._assume_photons_switch)
+        box.add(calib_row)
+        box.add(toga.Label(
+            "Off → intensity shown as a.u. (uncalibrated);  On → trusts the protocol's "
+            "photon calibration.",
+            style=Pack(color="#546e7a", font_size=9, margin_bottom=6)))
 
         box.add(toga.Label("─" * 80, style=Pack(color="#cccccc", margin_top=4, margin_bottom=8)))
         box.add(toga.Label("Plot Selection",
@@ -568,21 +757,45 @@ class ThunderSTORMAnalyzer(toga.App):
 
         return box
 
+    def _keep_scroll(self, fn) -> None:
+        """Run ``fn``, restoring the dataset list's scroll position afterwards.
+
+        Toga re-lays out the whole window whenever a widget/label value changes, which
+        snaps the dataset ``ScrollContainer`` back to the top. Saving and restoring the
+        vertical position keeps the user where they were while editing. Fully guarded so
+        it degrades to a plain ``fn()`` if a backend lacks the scroll-position API.
+        """
+        scroll = getattr(self, "_dataset_scroll", None)
+        pos = None
+        if scroll is not None:
+            try:
+                pos = scroll.vertical_position
+            except Exception:
+                pos = None
+        fn()
+        if scroll is not None and pos is not None:
+            try:
+                scroll.vertical_position = pos
+            except Exception:
+                pass
+
     def _update_col_pickers(self, headers: list[str]) -> None:
         """Replace TextInput col fields with Selection dropdowns populated from CSV headers."""
-        for _, attr, default in self._COL_DEFS:
-            row_box = self._col_rows[attr]
-            old_widget = self._col_inputs[attr]
-            # Pass 1: exact match on the canonical default name (e.g. "position_x")
-            best = next((h for h in headers if h == default), None)
-            # Pass 2: prefix substring fallback (e.g. "position" in "position_x")
-            if best is None:
-                prefix = default.split("_")[0].lower()
-                best = next((h for h in headers if prefix in h.lower()), headers[0])
-            sel = toga.Selection(items=headers, value=best, style=Pack(width=220))
-            self._col_inputs[attr] = sel
-            row_box.remove(old_widget)
-            row_box.add(sel)
+        def _swap() -> None:
+            for _, attr, default in self._COL_DEFS:
+                row_box = self._col_rows[attr]
+                old_widget = self._col_inputs[attr]
+                # Pass 1: exact match on the canonical default name (e.g. "position_x")
+                best = next((h for h in headers if h == default), None)
+                # Pass 2: prefix substring fallback (e.g. "position" in "position_x")
+                if best is None:
+                    prefix = default.split("_")[0].lower()
+                    best = next((h for h in headers if prefix in h.lower()), headers[0])
+                sel = toga.Selection(items=headers, value=best, style=Pack(width=220))
+                self._col_inputs[attr] = sel
+                row_box.remove(old_widget)
+                row_box.add(sel)
+        self._keep_scroll(_swap)
 
     def _read_config_tab(self) -> None:
         """Sync UI state from the Configuration tab into self._col_config, _plot_config, _n_spots."""
@@ -612,9 +825,9 @@ class ThunderSTORMAnalyzer(toga.App):
         except (ValueError, TypeError):
             self._n_spots = 3
         try:
-            self._max_triplets = max(1, int(self._max_triplets_input.value))
+            self._max_structures = max(1, int(self._max_structures_input.value))
         except (ValueError, TypeError):
-            self._max_triplets = 10
+            self._max_structures = 10
         try:
             self._min_blink_cycles = max(1, int(self._min_blink_cycles_input.value))
         except (ValueError, TypeError):
@@ -632,13 +845,10 @@ class ThunderSTORMAnalyzer(toga.App):
         except (ValueError, TypeError):
             self._dbscan_min_samples = 3
         try:
-            self._render_bin_size_nm = max(1, int(self._render_bin_size_input.value))
-        except (ValueError, TypeError):
-            self._render_bin_size_nm = 20
-        try:
             self._collinear_angle_deg = float(self._collinear_angle_input.value)
         except (ValueError, TypeError):
             self._collinear_angle_deg = 30.0
+        self._assume_photons = bool(self._assume_photons_switch.value)
 
     # ── Dataset management ────────────────────────────────────────────────────
 
@@ -699,13 +909,15 @@ class ThunderSTORMAnalyzer(toga.App):
         datasets = [r.to_entry() for r in self._dataset_rows]
         for entry in datasets:
             entry.qc.n_spots = self._n_spots
-            entry.qc.max_triplets = self._max_triplets
+            entry.qc.max_structures = self._max_structures
             entry.qc.min_blink_cycles = self._min_blink_cycles
             entry.qc.min_blink_frames = self._min_blink_frames
             entry.qc.blink_gap_frames = self._blink_gap_frames
             entry.qc.dbscan_min_samples = self._dbscan_min_samples
-            entry.qc.render_bin_size_nm = self._render_bin_size_nm
             entry.qc.collinear_angle_deg = self._collinear_angle_deg
+            entry.qc.assume_photons = self._assume_photons
+            # render_bin_size_nm is set per-dataset in DatasetRow.to_entry (from the
+            # dataset's Visualization magnification), so it is not overridden here.
 
         self.run_btn.enabled = False
         self.add_btn.enabled = False
@@ -775,7 +987,7 @@ class ThunderSTORMAnalyzer(toga.App):
         return tabs
 
     def _make_origami_viewer_box(self, r) -> toga.Box:
-        """Render the origami triplet carousel, or explain why it's not available."""
+        """Render the origami structure carousel, or explain why it's not available."""
         outer = toga.Box(style=Pack(direction=COLUMN, flex=1))
         if r.viewer_html_path and r.viewer_html_path.exists():
             html = r.viewer_html_path.read_text(encoding="utf-8")
@@ -806,6 +1018,7 @@ class ThunderSTORMAnalyzer(toga.App):
                 return f"{v:.2f}"
             return str(v)
 
+        iu = "photon" if self._assume_photons else "a.u."
         color = "#c62828" if r.error else "#1565C0"
         box.add(toga.Label(("⚠ " if r.error else "") + r.name,
                             style=Pack(color=color, font_size=12, margin_bottom=8)))
@@ -822,8 +1035,8 @@ class ThunderSTORMAnalyzer(toga.App):
             ("Std uncertainty (nm)", fmt(r.std_uncertainty)),
             ("Mean PSF sigma (nm)", fmt(r.mean_sigma)),
             ("Median PSF sigma (nm)", fmt(r.median_sigma)),
-            ("Mean intensity (ph)", fmt(r.mean_intensity)),
-            ("Median intensity (ph)", fmt(r.median_intensity)),
+            (f"Mean intensity ({iu})", fmt(r.mean_intensity)),
+            (f"Median intensity ({iu})", fmt(r.median_intensity)),
             ("Mean background σ", fmt(r.mean_bkgstd)),
             ("NND mean (nm)", fmt(r.nnd_mean)),
             ("NND median (nm)", fmt(r.nnd_median)),
@@ -859,11 +1072,12 @@ class ThunderSTORMAnalyzer(toga.App):
 
     def _make_plots_box(self, r) -> toga.Box:
         """Statistical charts: histograms, NND, intensity vs time, locs per frame."""
+        iu = "photon" if self._assume_photons else "a.u."
         plot_files = [
             ("uncertainty_histogram.png",
              lambda res: f"Uncertainty | median={res.median_uncertainty:.1f} nm, mean={res.mean_uncertainty:.1f} nm, n={res.n_filtered}"),
             ("intensity_hist.png",
-             lambda res: f"Intensity | mean={res.mean_intensity:.1f} ph, median={res.median_intensity:.1f} ph"),
+             lambda res: f"Intensity | mean={res.mean_intensity:.1f} {iu}, median={res.median_intensity:.1f} {iu}"),
             ("sigma_hist.png",
              lambda res: f"PSF sigma | mean={res.mean_sigma:.1f} nm, median={res.median_sigma:.1f} nm"),
             ("nnd_distribution.png",
@@ -973,10 +1187,11 @@ class ThunderSTORMAnalyzer(toga.App):
         outer = toga.Box(style=Pack(direction=COLUMN, flex=1))
         scroll_box = toga.Box(style=Pack(direction=COLUMN, margin=8))
 
+        iu = "photon" if self._assume_photons else "a.u."
         comp_plots = [
             ("n_filtered_comparison.png", "Localizations per dataset"),
             ("mean_uncertainty_comparison.png", "Mean localization uncertainty (nm)"),
-            ("median_intensity_comparison.png", "Median intensity (photon)"),
+            ("median_intensity_comparison.png", f"Median intensity ({iu})"),
             ("mean_sigma_comparison.png", "Mean PSF sigma (nm)"),
             ("nnd_mean_comparison.png", "Mean NND (nm)"),
             ("nnd_target_mean_comparison.png", "NND target subset mean (nm)"),

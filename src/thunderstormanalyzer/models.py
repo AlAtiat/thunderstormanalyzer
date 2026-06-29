@@ -33,18 +33,29 @@ class QcParams:
     max_sigma_nm: float = 768.0
     max_uncertainty_nm: float = 40.0
     min_intensity: float = 1000.0
-    nnd_target_nm: float = 80.0
-    nnd_tolerance_nm: float = 20.0
+    # Single distance used for BOTH the structure spacing and the NND-target band.
     dna_origami_spacing_nm: float = 80.0
     spacing_tol_nm: float = 20.0
     n_spots: int = 3
-    max_triplets: int = 10
+    max_structures: int = 10
     min_blink_cycles: int = 2
     min_blink_frames: int = 5
     blink_gap_frames: int = 2
     dbscan_min_samples: int = 3
-    render_bin_size_nm: int = 20
+    # Super-resolution render up-sampling (ThunderSTORM-style). By default the render
+    # bin size is auto-derived per dataset:
+    #   render_bin_size_nm = pixel_size_nm / visualization_magnification
+    #                        (floored at 1 nm, 20 nm fallback on bad input).
+    # A smaller visualization magnification gives a larger (coarser) bin. The "Bin size
+    # (nm)" field in the optics section shows this live value and may be edited per
+    # dataset (a manual value persists until the other optics fields change).
+    visualization_magnification: float = 5.0
+    render_bin_size_nm: float = 20.0
     collinear_angle_deg: float = 30.0
+    # Whether the loaded intensity column is photon-calibrated. The app never recomputes
+    # intensity (ThunderSTORM already applied/skipped the gain on export), so this only
+    # controls labeling: False → "a.u." (uncalibrated, default), True → "photon".
+    assume_photons: bool = False
 
 
 @dataclass

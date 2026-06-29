@@ -7,7 +7,7 @@
 
     <groupId>com.thunderstorm</groupId>
     <artifactId>thunderstorm-analyzer</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <packaging>jar</packaging>
 
     <name>ThunderSTORM Origami Analyzer</name>

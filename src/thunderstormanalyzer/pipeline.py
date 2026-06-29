@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import locan as lc
+# Raw ThunderSTORM → canonical column-name map lives in the dependency-free
+# `columns` module so the GUI can reuse it when reading just a CSV header.
+from .columns import THUNDERSTORM_ALIASES as _THUNDERSTORM_ALIASES
 from .models import AnalysisResult, ColumnConfig, DatasetEntry, PlotConfig, QcParams
 
 
@@ -24,19 +27,6 @@ LogFn = Callable[[str], None]
 
 _FALLBACK_INITIAL_SIGMA_PX = 1.6
 _COLLINEAR_ANGLE_DEG = 30.0
-
-# Maps raw ThunderSTORM CSV column names to locan's canonical names.
-# Applied after loading so the rest of the pipeline always sees consistent names
-# regardless of whether the file was opened in ThunderSTORM or Generic mode.
-_THUNDERSTORM_ALIASES: dict[str, str] = {
-    "x [nm]": "position_x",
-    "y [nm]": "position_y",
-    "uncertainty_xy [nm]": "uncertainty_x",
-    "sigma [nm]": "psf_sigma",
-    "intensity [photon]": "intensity",
-    "offset [photon]": "offset",
-    "bkgstd [photon]": "background_sigma",
-}
 
 _SPOT_COLORS = ["#F44336", "#4CAF50", "#2196F3"]
 
@@ -101,8 +91,6 @@ def qc_from_protocol(protocol: dict) -> QcParams:
         max_sigma_nm=max_sigma_nm,
         max_uncertainty_nm=max_uncertainty_nm,
         min_intensity=min_intensity,
-        nnd_target_nm=defaults.nnd_target_nm,
-        nnd_tolerance_nm=defaults.nnd_tolerance_nm,
         dna_origami_spacing_nm=defaults.dna_origami_spacing_nm,
         spacing_tol_nm=defaults.spacing_tol_nm,
     )
@@ -111,6 +99,16 @@ def qc_from_protocol(protocol: dict) -> QcParams:
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
+
+def _intensity_unit(assume_photons: bool) -> str:
+    """Unit label for the intensity column.
+
+    The pipeline never recomputes intensity (ThunderSTORM already applied or skipped the
+    photon calibration on export). When the user has not confirmed a real calibration we
+    label it honestly as arbitrary units rather than asserting "photon".
+    """
+    return "photon" if assume_photons else "a.u."
+
 
 def _plot_histogram(series: pd.Series, xlabel: str, ylabel: str,
                     path: Path, title: str,
@@ -170,18 +168,49 @@ def _add_scalebar(ax: plt.Axes, scale_nm: float = 1000.0,
     tick_h = y_span * 0.012
     for xv in (x0, x1):
         ax.plot([xv, xv], [y - tick_h, y + tick_h], color=color, linewidth=2.0, zorder=10)
-    label = f"{scale_nm:.0f} nm" if scale_nm < 1000 else f"{scale_nm / 1000:.0f} µm"
-    ax.text((x0 + x1) / 2, y + y_span * 0.025, label,
+    ax.text((x0 + x1) / 2, y + y_span * 0.025, _scale_bar_label(scale_nm),
             color=color, fontsize=9, ha="center", va="bottom", zorder=10,
             fontweight="bold")
 
 
+def _scale_bar_label(scale_nm: float) -> str:
+    """Format a scale-bar length in nm, switching to µm at/above 1000 nm."""
+    return f"{scale_nm:.0f} nm" if scale_nm < 1000 else f"{scale_nm / 1000:.0f} µm"
+
+
+def _scale_bar_nm(field_width_nm: float, base_nm: float) -> float | None:
+    """Scale-bar length anchored to the structure scale (``base_nm`` = spacing + tol).
+
+    Small fields use exactly ``base_nm``; on wide fields it grows to the smallest round
+    multiple ``k × base_nm`` (k ∈ 1,2,5,10,…) that reaches ~12 % of the field width — so a
+    tens-of-µm render shows e.g. 1–2 µm (a clean multiple of the 100 nm structure scale),
+    not an arbitrary round number. Returns ``None`` when ``base_nm`` is missing/non-positive
+    so the caller can fall back to its previous behaviour.
+    """
+    if not (base_nm > 0) or base_nm == float("inf"):
+        return None
+    target = 0.12 * field_width_nm
+    if base_nm >= target:
+        return base_nm
+    for k in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000):
+        if k * base_nm >= target:
+            return k * base_nm
+    return 1000 * base_nm
+
+
 def _render_with_fallback(lc, locdata, path: Path, title: str, log_fn: LogFn,
-                          pixel_size_nm: float = 100.0) -> None:
-    """Render super-res image, retrying at coarser bins if OOM."""
+                          pixel_size_nm: float = 100.0, bin_size_nm: float = 20.0,
+                          base_nm: float = 0.0) -> None:
+    """Render super-res image at ``bin_size_nm``, retrying at coarser bins if OOM.
+
+    ``base_nm`` (= spacing + tolerance) anchors the scale bar to the structure scale; see
+    ``_scale_bar_nm``. When 0/missing the bar falls back to a round ≈15 % of field width.
+    """
     Trafo = lc.Trafo
-    # Pick a round scale-bar length: aim for ~15% of the field width
-    for bin_size in (20, 40, 80):
+    # Try the requested (visualization-derived) bin first, then escalate to coarser
+    # standard bins on out-of-memory so a too-fine render still produces an image.
+    bin_sizes = [bin_size_nm, *(b for b in (20, 40, 80) if b > bin_size_nm)]
+    for bin_size in bin_sizes:
         try:
             fig, ax = plt.subplots(figsize=(10, 10), facecolor="black")
             ax.set_facecolor("black")
@@ -193,11 +222,14 @@ def _render_with_fallback(lc, locdata, path: Path, title: str, log_fn: LogFn,
             ax.tick_params(colors="white")
             for spine in ax.spines.values():
                 spine.set_edgecolor("white")
-            # Scale bar: choose a round length ≈15% of the x-span
+            # Scale bar: anchor to the structure scale (spacing + tolerance), or fall
+            # back to a round ≈15 % of the x-span when no spacing is available.
             x_span = ax.get_xlim()[1] - ax.get_xlim()[0]
-            raw = x_span * 0.15
-            magnitude = 10 ** np.floor(np.log10(raw))
-            scale_nm = round(raw / magnitude) * magnitude
+            scale_nm = _scale_bar_nm(x_span, base_nm)
+            if scale_nm is None:
+                raw = x_span * 0.15
+                magnitude = 10 ** np.floor(np.log10(raw))
+                scale_nm = round(raw / magnitude) * magnitude
             _add_scalebar(ax, scale_nm=scale_nm)
             fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="black")
             plt.close(fig)
@@ -317,8 +349,8 @@ def _are_collinear(cx: list[float], cy: list[float],
 
 
 
-def _order_triplet(spots: list[dict]) -> list[dict]:
-    """Order three spots along their principal axis (left → right)."""
+def _order_structure(spots: list[dict]) -> list[dict]:
+    """Order the spots of a structure along their principal axis (left → right)."""
     pts = np.array([[s["cx"], s["cy"]] for s in spots])
     center = pts.mean(axis=0)
     pts_c = pts - center
@@ -330,7 +362,7 @@ def _order_triplet(spots: list[dict]) -> list[dict]:
 
 
 
-def _find_all_blinking_triplets(
+def _find_all_blinking_structures(
     df_3sigma: pd.DataFrame,
     n_spots: int = 3,
     spacing_nm: float = 80.0,
@@ -341,7 +373,7 @@ def _find_all_blinking_triplets(
     y_col: str = "position_y",
     frame_col: str = "frame",
     intensity_col: str = "intensity",
-    max_triplets: int = 10,
+    max_structures: int = 10,
     min_blink_cycles: int = 2,
     min_blink_frames: int = 5,
     blink_gap_frames: int = 2,
@@ -349,10 +381,14 @@ def _find_all_blinking_triplets(
     collinear_angle_deg: float = 30.0,
     log_fn: LogFn | None = None,
 ) -> tuple[list[list[dict]], str]:
-    """Detect all valid collinear triplets of blinking clusters.
+    """Detect all valid collinear ``n_spots``-dot structures of blinking clusters.
 
-    Returns (all_triplets_sorted_by_score, diagnostic_message).
-    Each triplet is a list of 3 spot dicts ordered along their principal axis.
+    A structure is a chain of ``n_spots`` blinking clusters that are evenly spaced
+    (~``spacing_nm`` apart) and collinear (within ``collinear_angle_deg``). ``n_spots=2``
+    finds dimers, ``3`` triplets, ``4`` tetramers, etc.
+
+    Returns (all_structures_sorted_by_score, diagnostic_message). Each structure is a
+    list of ``n_spots`` spot dicts ordered along their principal axis.
     """
     from scipy.spatial import cKDTree
 
@@ -489,67 +525,84 @@ def _find_all_blinking_triplets(
         _log(f"  [WARN] {msg}")
         return [], msg
 
-    # --- Find all valid collinear triplets ---
-    seen_triplet_sets: set[frozenset[int]] = set()
-    all_triplets: list[tuple[float, list[dict]]] = []
+    # --- Grow each valid pair into a collinear n_spots-dot chain ---
+    # Generalises the old triplet-only search: from a pair at the right spacing, the
+    # chain is extended one dot at a time by extrapolating the last segment and accepting
+    # the nearest blinking cluster that keeps the spacing (~first segment) and stays
+    # collinear. n_spots=2 → dimers, 3 → triplets, 4 → tetramers, …
+    seen_structure_sets: set[frozenset[int]] = set()
+    all_structures: list[tuple[float, list[dict]]] = []
     n_collinear_checked = 0
 
-    for (i, j, _dij) in valid_pairs:
-        for anchor_idx, other_idx in [(i, j), (j, i)]:
-            ax_, ay_ = scored_candidates[anchor_idx]["cx"], scored_candidates[anchor_idx]["cy"]
-            ox, oy = scored_candidates[other_idx]["cx"], scored_candidates[other_idx]["cy"]
-            dx, dy = ox - ax_, oy - ay_
-            norm = np.hypot(dx, dy)
-            if norm < 1e-6:
+    def _score_structure(members: list[dict]) -> float:
+        # Score by the WEAKEST spot — a structure with one near-silent dye must lose.
+        # min²×mean dominates: [88,37,2]→169 vs [20,18,15]→3982 — balanced wins.
+        cyc = [_count_on_off_cycles(m["df"][frame_col].values, gap_threshold=blink_gap_frames)
+               for m in members]
+        min_c = min(cyc)
+        mean_c = float(np.mean(cyc))
+        quality_sum = sum(m["score"] for m in members)
+        return float(min_c ** 2 * mean_c * quality_sum)
+
+    def _accept(chain: list[int]) -> None:
+        key = frozenset(chain)
+        if key in seen_structure_sets:
+            return
+        seen_structure_sets.add(key)
+        members = [scored_candidates[idx] for idx in chain]
+        all_structures.append((_score_structure(members), members))
+
+    def _extend_chain(chain: list[int], first_dij: float) -> None:
+        nonlocal n_collinear_checked
+        if len(chain) == n_spots:
+            _accept(chain)
+            return
+        prev_idx, last_idx = chain[-2], chain[-1]
+        px, py = scored_candidates[prev_idx]["cx"], scored_candidates[prev_idx]["cy"]
+        lx, ly = scored_candidates[last_idx]["cx"], scored_candidates[last_idx]["cy"]
+        # Predict the next dot by extrapolating the last segment, then search nearby.
+        pred_x, pred_y = lx + (lx - px), ly + (ly - py)
+        for k in tree.query_ball_point([pred_x, pred_y], r=spacing_tol_nm * 2.5):
+            if k in chain:
                 continue
-            ux, uy = dx / norm, dy / norm
-            tx = ox + ux * _dij
-            ty = oy + uy * _dij
-            nearby = tree.query_ball_point([tx, ty], r=spacing_tol_nm * 2.5)
-            for k in nearby:
-                if k == i or k == j:
-                    continue
-                key = frozenset({anchor_idx, other_idx, k})
-                if key in seen_triplet_sets:
-                    continue
-                djk = np.hypot(ox - scored_candidates[k]["cx"], oy - scored_candidates[k]["cy"])
-                if not (_dij * 0.70 <= djk <= _dij * 1.30):
-                    continue
-                n_collinear_checked += 1
-                cx_pts = [ax_, ox, scored_candidates[k]["cx"]]
-                cy_pts = [ay_, oy, scored_candidates[k]["cy"]]
-                if not _are_collinear(cx_pts, cy_pts, angle_tol_deg=collinear_angle_deg):
-                    continue
-                seen_triplet_sets.add(key)
-                triplet_raw = [scored_candidates[anchor_idx], scored_candidates[other_idx], scored_candidates[k]]
-                # Score by the WEAKEST spot — a triplet with one near-silent dye must lose
-                _cycles = [_count_on_off_cycles(s["df"][frame_col].values, gap_threshold=blink_gap_frames) for s in triplet_raw]
-                _min_cycles = min(_cycles)
-                _mean_cycles = float(np.mean(_cycles))
-                _quality_sum = sum(s["score"] for s in triplet_raw)
-                # min²×mean dominates: [88,37,2]→169 vs [20,18,15]→3982 — balanced wins
-                triplet_score = float(_min_cycles ** 2 * _mean_cycles * _quality_sum)
-                all_triplets.append((triplet_score, triplet_raw))
+            kx, ky = scored_candidates[k]["cx"], scored_candidates[k]["cy"]
+            seg = np.hypot(kx - lx, ky - ly)
+            # Uniform spacing: each segment within ±30% of the first.
+            if not (first_dij * 0.70 <= seg <= first_dij * 1.30):
+                continue
+            n_collinear_checked += 1
+            if not _are_collinear([px, lx, kx], [py, ly, ky], angle_tol_deg=collinear_angle_deg):
+                continue
+            _extend_chain(chain + [k], first_dij)
+
+    if n_spots <= 2:
+        # A valid pair at the right spacing is already a complete (dimer) structure.
+        for (i, j, _dij) in valid_pairs:
+            _accept([i, j])
+    else:
+        for (i, j, _dij) in valid_pairs:
+            _extend_chain([i, j], _dij)   # grow beyond j
+            _extend_chain([j, i], _dij)   # grow beyond i
 
     _log(f"  [INFO] Collinear candidates checked: {n_collinear_checked}  "
-         f"→ triplets found: {len(all_triplets)}")
+         f"→ {n_spots}-dot structures found: {len(all_structures)}")
 
-    if not all_triplets:
+    if not all_structures:
         msg = (f"Origami detection failed: {len(valid_pairs)} valid pairs found but no collinear "
-               f"triplets passed geometry check (angle tol={collinear_angle_deg:.0f}°). "
+               f"{n_spots}-dot structures passed geometry check (angle tol={collinear_angle_deg:.0f}°). "
                f"Try increasing spacing_tol_nm or collinear angle tolerance.")
         _log(f"  [WARN] {msg}")
         return [], msg
 
-    # Sort by score descending, cap at max_triplets
-    all_triplets.sort(key=lambda t: t[0], reverse=True)
-    all_triplets = all_triplets[:max_triplets]
-    _log(f"  [INFO] Returning top {len(all_triplets)} triplets by score")
+    # Sort by score descending, cap at max_structures
+    all_structures.sort(key=lambda t: t[0], reverse=True)
+    all_structures = all_structures[:max_structures]
+    _log(f"  [INFO] Returning top {len(all_structures)} structures by score")
 
-    # Order each triplet along its principal axis and convert to output format
+    # Order each structure along its principal axis and convert to output format
     result: list[list[dict]] = []
-    for _score, raw_triplet in all_triplets:
-        ordered = _order_triplet(raw_triplet)
+    for _score, raw_structure in all_structures:
+        ordered = _order_structure(raw_structure)
         result.append([
             {
                 "label": s["label"],
@@ -567,7 +620,8 @@ def _find_all_blinking_triplets(
             for s in ordered
         ])
 
-    msg = f"Found {len(result)} collinear origami triplet(s); top score={all_triplets[0][0]:.1f}"
+    msg = (f"Found {len(result)} collinear origami structure(s) of {n_spots} dots; "
+           f"top score={all_structures[0][0]:.1f}")
     return result, msg
 
 
@@ -580,36 +634,37 @@ def _find_best_blinking_spots(df_3sigma: pd.DataFrame, n_spots: int = 3,
                                y_col: str = "position_y",
                                frame_col: str = "frame",
                                intensity_col: str = "intensity") -> list[dict]:
-    """Legacy wrapper — returns only the top-scoring triplet (flat list of 3 spots)."""
-    triplets, _ = _find_all_blinking_triplets(
+    """Legacy wrapper — returns only the top-scoring structure (flat list of spots)."""
+    structures, _ = _find_all_blinking_structures(
         df_3sigma, n_spots=n_spots, spacing_nm=spacing_nm,
         spacing_tol_nm=spacing_tol_nm, pixel_size_nm=pixel_size_nm,
         uncertainty_col=uncertainty_col,
         x_col=x_col, y_col=y_col, frame_col=frame_col, intensity_col=intensity_col,
     )
-    return triplets[0] if triplets else []
+    return structures[0] if structures else []
 
 
 # ---------------------------------------------------------------------------
-# Per-triplet viewer PNGs
+# Per-structure viewer PNGs
 # ---------------------------------------------------------------------------
 
 def _write_interactive_viewer(
-    all_triplets: list[list[dict]],
+    all_structures: list[list[dict]],
     df_3sigma: pd.DataFrame,
     out_dir: Path,
     dataset_name: str,
     frame_col: str = "frame",
     intensity_col: str = "intensity",
     render_bin_size_nm: int = 20,
+    base_nm: float = 0.0,
     log_fn: LogFn | None = None,
 ) -> Path | None:
-    """Render one PNG per triplet plus per-spot on/off traces, bundled into a self-contained HTML carousel.
+    """Render one PNG per structure plus per-spot on/off traces, bundled into a self-contained HTML carousel.
 
-    Each slide shows the main 4-panel triplet image followed by individual single-emitter
+    Each slide shows the main 4-panel structure image followed by individual single-emitter
     blinking trace charts (one per spot), matching the Fiji plugin HTML carousel layout.
     Works offline; loaded by toga.WebView via a file:// URL.
-    Returns the path to the HTML file, or None if no triplets exist.
+    Returns the path to the HTML file, or None if no structures exist.
     """
     import base64
     import io
@@ -621,7 +676,7 @@ def _write_interactive_viewer(
         if log_fn:
             log_fn(msg)
 
-    if not all_triplets:
+    if not all_structures:
         return None
 
     frame_min = int(df_3sigma[frame_col].min())
@@ -633,7 +688,7 @@ def _write_interactive_viewer(
     # Each entry: {"main": b64str, "traces": [b64str, ...], "meta": ["Spot #1 | N cycles | M frames", ...]}
     slides: list[dict] = []
 
-    for t_idx, triplet in enumerate(all_triplets):
+    for t_idx, triplet in enumerate(all_structures):
         # --- Build intensity blinking traces for combined panel ---
         traces = []
         for sp in triplet:
@@ -660,13 +715,13 @@ def _write_interactive_viewer(
             lc.render_2d(locs_3sigma_for_render, bin_size=render_bin_size_nm,
                          rescale=lc.Trafo.EQUALIZE,
                          cmap="cet_fire", cbar=False, ax=ax_main)
-            ax_main.set_title(f"{dataset_name} — origami triplet {t_idx + 1}",
+            ax_main.set_title(f"{dataset_name} — origami structure {t_idx + 1}",
                               color="white", fontsize=11, pad=6)
             ax_main.tick_params(colors="white")
             for spine in ax_main.spines.values():
                 spine.set_edgecolor("white")
 
-            # Bounding box around triplet spots
+            # Bounding box around structure spots
             pad_nm = 200.0
             bx0 = min(sp["x_min"] for sp in triplet) - pad_nm
             bx1 = max(sp["x_max"] for sp in triplet) + pad_nm
@@ -700,7 +755,8 @@ def _write_interactive_viewer(
             ax_zoom.set_xlim(bx0, bx1)
             ax_zoom.set_ylim(by0, by1)
 
-            for sp, color in zip(triplet, _SPOT_COLORS):
+            for ci, sp in enumerate(triplet):
+                color = _SPOT_COLORS[ci % len(_SPOT_COLORS)]
                 r_nm = max(sp.get("vis_radius", 30.0), 15.0)
                 cx = sp.get("x_center", sp.get("cx", 0.0))
                 cy = sp.get("y_center", sp.get("cy", 0.0))
@@ -711,17 +767,17 @@ def _write_interactive_viewer(
                 )
                 ax_zoom.add_patch(circle)
 
-            # 100 nm scale bar
-            bar_len_nm = 100.0
+            # Scale bar anchored to the structure scale (spacing + tolerance).
+            bar_len_nm = _scale_bar_nm(bx1 - bx0, base_nm) or 100.0
             bar_x0 = bx0 + pad_nm * 0.15
             bar_y   = by0 + pad_nm * 0.25
             ax_zoom.plot([bar_x0, bar_x0 + bar_len_nm], [bar_y, bar_y],
                          color="white", linewidth=2.5, zorder=8,
                          solid_capstyle="butt")
             ax_zoom.text(bar_x0 + bar_len_nm / 2, bar_y + pad_nm * 0.12,
-                         "100 nm", color="white", fontsize=8,
+                         _scale_bar_label(bar_len_nm), color="white", fontsize=8,
                          ha="center", zorder=8)
-            ax_zoom.set_title("Magnified triplet", color="white", fontsize=10, pad=4)
+            ax_zoom.set_title("Magnified structure", color="white", fontsize=10, pad=4)
             ax_zoom.tick_params(colors="white", labelsize=7)
             for spine in ax_zoom.spines.values():
                 spine.set_edgecolor("white")
@@ -729,9 +785,8 @@ def _write_interactive_viewer(
             # Combined normalised blinking traces
             n_spots = len(triplet)
             ax_combo.set_facecolor("#0a0a0a")
-            for i, (sp, color, trace) in enumerate(
-                zip(triplet, _SPOT_COLORS[:n_spots], traces)
-            ):
+            for i, (sp, trace) in enumerate(zip(triplet, traces)):
+                color = _SPOT_COLORS[i % len(_SPOT_COLORS)]
                 peak   = trace.max() or 1.0
                 norm   = trace / peak
                 offset = (n_spots - 1 - i) * 0.3
@@ -743,7 +798,7 @@ def _write_interactive_viewer(
                               label=f"Dot #{i + 1}  ({n_cyc} cycles)")
             ax_combo.set_xlabel("Frame", color="white", fontsize=10)
             ax_combo.set_ylabel("Norm. intensity + offset", color="white", fontsize=10)
-            ax_combo.set_title(f"Blinking traces — triplet {t_idx + 1}",
+            ax_combo.set_title(f"Blinking traces — structure {t_idx + 1}",
                                color="white", fontsize=10)
             ax_combo.tick_params(colors="white")
             for spine in ax_combo.spines.values():
@@ -757,7 +812,7 @@ def _write_interactive_viewer(
             plt.close(fig)
             main_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception as exc:
-            _log(f"  [WARN] Triplet {t_idx + 1} render failed: {exc}")
+            _log(f"  [WARN] Structure {t_idx + 1} render failed: {exc}")
             plt.close("all")
 
         if main_b64 is None:
@@ -799,7 +854,7 @@ def _write_interactive_viewer(
                 spot_b64s.append(base64.b64encode(sbuf.getvalue()).decode("ascii"))
                 spot_metas.append(f"Spot #{k + 1}&nbsp;|&nbsp;{n_cyc} cycle{'s' if n_cyc != 1 else ''}&nbsp;|&nbsp;{n_det} frames")
             except Exception as exc:
-                _log(f"  [WARN] Spot trace render failed (triplet {t_idx + 1}, spot {k + 1}): {exc}")
+                _log(f"  [WARN] Spot trace render failed (structure {t_idx + 1}, spot {k + 1}): {exc}")
                 plt.close("all")
 
         slides.append({"main": main_b64, "traces": spot_b64s, "meta": spot_metas})
@@ -862,7 +917,7 @@ def _write_interactive_viewer(
   <span id="counter"></span>
   <button id="next" onclick="show(current+1)">Next &#8594;</button>
 </div>
-<img id="main-img" src="" alt="triplet">
+<img id="main-img" src="" alt="structure">
 <div id="traces-section">
   <h3>Single-emitter blinking traces</h3>
   <div id="traces-row"></div>
@@ -875,7 +930,7 @@ def _write_interactive_viewer(
     current = i;
     const s = slides[i];
     document.getElementById('main-img').src = 'data:image/png;base64,' + s.main;
-    document.getElementById('counter').textContent = 'Triplet ' + (i + 1) + ' / ' + slides.length;
+    document.getElementById('counter').textContent = 'Structure ' + (i + 1) + ' / ' + slides.length;
     document.getElementById('prev').disabled = i === 0;
     document.getElementById('next').disabled = i === slides.length - 1;
     const row = document.getElementById('traces-row');
@@ -900,18 +955,18 @@ def _write_interactive_viewer(
 
     html_path = out_dir / "blinking_interactive.html"
     html_path.write_text(html, encoding="utf-8")
-    _log(f"  [INFO] {len(slides)} triplet(s) written to blinking_interactive.html")
+    _log(f"  [INFO] {len(slides)} structure(s) written to blinking_interactive.html")
     return html_path
 
 
 def _save_spot_trace_pngs(
-    all_triplets: list[list[dict]],
+    all_structures: list[list[dict]],
     out_dir: Path,
     frame_col: str = "frame",
     intensity_col: str = "intensity",
     log_fn: LogFn | None = None,
 ) -> None:
-    """Save one on/off blinking trace PNG per spot per triplet (mirrors Fiji HtmlCarousel)."""
+    """Save one on/off blinking trace PNG per spot per structure (mirrors Fiji HtmlCarousel)."""
     def _log(msg: str) -> None:
         if log_fn:
             log_fn(msg)
@@ -920,8 +975,8 @@ def _save_spot_trace_pngs(
     traces_dir.mkdir(parents=True, exist_ok=True)
 
     saved = 0
-    for t_idx, triplet in enumerate(all_triplets):
-        for k, sp in enumerate(triplet):
+    for t_idx, structure in enumerate(all_structures):
+        for k, sp in enumerate(structure):
             try:
                 frames_arr = sp["df"][frame_col].values
                 if len(frames_arr) == 0:
@@ -951,12 +1006,12 @@ def _save_spot_trace_pngs(
                 for spine in ax.spines.values():
                     spine.set_edgecolor("#444444")
 
-                fname = traces_dir / f"triplet_{t_idx + 1:02d}_spot_{k + 1}.png"
+                fname = traces_dir / f"structure_{t_idx + 1:02d}_spot_{k + 1}.png"
                 fig.savefig(fname, dpi=150, bbox_inches="tight", facecolor="#111111")
                 plt.close(fig)
                 saved += 1
             except Exception as exc:
-                _log(f"  [WARN] Spot trace PNG failed (triplet {t_idx + 1}, spot {k + 1}): {exc}")
+                _log(f"  [WARN] Spot trace PNG failed (structure {t_idx + 1}, spot {k + 1}): {exc}")
                 plt.close("all")
 
     if saved:
@@ -968,7 +1023,8 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
                              out_dir: Path, dataset_name: str,
                              frame_col: str = "frame",
                              intensity_col: str = "intensity",
-                             render_bin_size_nm: int = 20) -> None:
+                             render_bin_size_nm: int = 20,
+                             base_nm: float = 0.0) -> None:
     import matplotlib.patches as mpatches
     import matplotlib.gridspec as gridspec
 
@@ -1000,7 +1056,7 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
     ax_main.set_facecolor("black")
     lc.render_2d(locs_3sigma, bin_size=render_bin_size_nm, rescale=Trafo.EQUALIZE,
                  cmap="cet_fire", cbar=False, ax=ax_main)
-    ax_main.set_title(f"{dataset_name} — DNA origami triplet",
+    ax_main.set_title(f"{dataset_name} — DNA origami structure ({n_spots} dots)",
                       color="white", fontsize=11, pad=6)
     ax_main.tick_params(colors="white")
     for spine in ax_main.spines.values():
@@ -1035,7 +1091,8 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
     ax_zoom.set_xlim(bx0, bx1)
     ax_zoom.set_ylim(by0, by1)
 
-    for sp, color in zip(spots, _SPOT_COLORS[:n_spots]):
+    for ci, sp in enumerate(spots):
+        color = _SPOT_COLORS[ci % len(_SPOT_COLORS)]
         r_nm = max(sp.get("vis_radius", 30.0), 15.0)
         circle = mpatches.Circle(
             (sp["x_center"], sp["y_center"]), radius=r_nm,
@@ -1044,21 +1101,22 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
         )
         ax_zoom.add_patch(circle)
 
-    bar_len_nm = 100.0
+    bar_len_nm = _scale_bar_nm(bx1 - bx0, base_nm) or 100.0
     bar_x0 = bx0 + pad_nm * 0.15
     bar_y = by0 + pad_nm * 0.25
     ax_zoom.plot([bar_x0, bar_x0 + bar_len_nm], [bar_y, bar_y],
                  color="white", linewidth=2.5, zorder=8, solid_capstyle="butt")
     ax_zoom.text(bar_x0 + bar_len_nm / 2, bar_y + pad_nm * 0.12,
-                 "100 nm", color="white", fontsize=8, ha="center", zorder=8)
+                 _scale_bar_label(bar_len_nm), color="white", fontsize=8, ha="center", zorder=8)
 
-    ax_zoom.set_title("Magnified triplet", color="white", fontsize=10, pad=4)
+    ax_zoom.set_title("Magnified structure", color="white", fontsize=10, pad=4)
     ax_zoom.tick_params(colors="white", labelsize=7)
     for spine in ax_zoom.spines.values():
         spine.set_edgecolor("white")
 
     ax_combo.set_facecolor("#0a0a0a")
-    for i, (sp, color, trace) in enumerate(zip(spots, _SPOT_COLORS[:n_spots], traces)):
+    for i, (sp, trace) in enumerate(zip(spots, traces)):
+        color = _SPOT_COLORS[i % len(_SPOT_COLORS)]
         peak = trace.max() or 1.0
         norm_trace = trace / peak
         offset = (n_spots - 1 - i) * 0.3
@@ -1069,7 +1127,7 @@ def _plot_blinking_showcase(lc, locs_3sigma: object, spots: list[dict],
                              f"({_count_on_off_cycles(sp['df']['frame'].values)} cycles)"))
     ax_combo.set_xlabel("Frame", color="white", fontsize=10)
     ax_combo.set_ylabel("Norm. intensity + vertical offset", color="white", fontsize=10)
-    ax_combo.set_title("Blinking traces — all 3 dots", color="white", fontsize=10)
+    ax_combo.set_title(f"Blinking traces — all {n_spots} dots", color="white", fontsize=10)
     ax_combo.tick_params(colors="white")
     for spine in ax_combo.spines.values():
         spine.set_edgecolor("#444444")
@@ -1102,11 +1160,12 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
     out_dir = output_dir / safe_name / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    intensity_unit = _intensity_unit(qc.assume_photons)
     log_fn(f"  [{entry.name}] QC: pixel={qc.pixel_size_nm:.0f} nm  "
            f"max_sigma={qc.max_sigma_nm:.0f} nm  "
            f"max_unc={qc.max_uncertainty_nm:.0f} nm  "
-           f"min_intensity={qc.min_intensity:.0f} ph  "
-           f"nnd_target={qc.nnd_target_nm:.0f}±{qc.nnd_tolerance_nm:.0f} nm")
+           f"min_intensity={qc.min_intensity:.0f} {intensity_unit}  "
+           f"spacing/NND={qc.dna_origami_spacing_nm:.0f}±{qc.spacing_tol_nm:.0f} nm")
 
     if entry.csv_format == "generic":
         log_fn(f"  [{entry.name}] Generic CSV mode — units assumed to match column picker selections")
@@ -1160,6 +1219,20 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
     det = protocol.get("analysisDetector", {})
     filt = protocol.get("analysisFilter", {})
 
+    if qc.assume_photons and cam:
+        # Echo the calibration we're trusting, and flag a common inconsistency:
+        # EM gain declared off while a non-unity gain is still set.
+        log_fn(f"  [{entry.name}] Intensity = photons (calibration: offset="
+               f"{cam.get('offset')}, photons2ADU={cam.get('photons2ADU')}, "
+               f"isEmGain={cam.get('isEmGain')}, gain={cam.get('gain')})")
+        try:
+            if cam.get("isEmGain") is False and float(cam.get("gain", 1)) not in (0, 1):
+                log_fn(f"  [WARN] {entry.name}: isEmGain=false but gain="
+                       f"{cam.get('gain')} — photon scaling may be wrong; verify the camera "
+                       f"calibration in ThunderSTORM.")
+        except (TypeError, ValueError):
+            pass
+
     stats: dict = {
         "name": entry.name,
         "protocol": {
@@ -1187,13 +1260,15 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             "magnification": qc.magnification,
             "effective_pixel_size_nm": qc.pixel_size_nm,
             "csv_format": entry.csv_format,
+            "intensity_unit": intensity_unit,
+            "assume_photons": qc.assume_photons,
         },
         "qc_thresholds_applied": {
             "min_intensity_photon": qc.min_intensity,
             "max_uncertainty_nm": qc.max_uncertainty_nm,
             "max_sigma_nm": qc.max_sigma_nm,
-            "nnd_target_nm": qc.nnd_target_nm,
-            "nnd_tolerance_nm": qc.nnd_tolerance_nm,
+            "spacing_nm": qc.dna_origami_spacing_nm,
+            "spacing_tol_nm": qc.spacing_tol_nm,
         },
         "n_raw": n_raw,
         "n_filtered": n_filtered,
@@ -1218,7 +1293,7 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             _plot_histogram(unc, "Localization uncertainty (nm)", "Count",
                             out_dir / "uncertainty_hist.png", entry.name,
                             annot_stats=unc)
-            _plot_histogram(intensity, "Intensity (photon)", "Count",
+            _plot_histogram(intensity, f"Intensity ({intensity_unit})", "Count",
                             out_dir / "intensity_hist.png", entry.name,
                             annot_stats=intensity)
             _plot_histogram(sigma, "PSF sigma (nm)", "Count",
@@ -1253,7 +1328,7 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
 
     if plot_config.histograms:
         try:
-            _plot_histogram(df_3sigma[c.intensity_col], "Intensity (photon)", "Count",
+            _plot_histogram(df_3sigma[c.intensity_col], f"Intensity ({intensity_unit})", "Count",
                             out_dir / "intensity_hist_3sigma.png", f"{entry.name} — 3σ subset",
                             annot_stats=df_3sigma[c.intensity_col])
             _plot_histogram(df_3sigma[c.uncertainty_col], "Localization uncertainty (nm)", "Count",
@@ -1267,9 +1342,12 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             log_fn(f"  [WARN] 3σ histograms failed for {entry.name}: {e}")
 
     if plot_config.superres_render:
-        _render_with_fallback(lc, locs, out_dir / "superres_render.png", entry.name, log_fn)
+        _base_nm = qc.dna_origami_spacing_nm + qc.spacing_tol_nm
+        _render_with_fallback(lc, locs, out_dir / "superres_render.png", entry.name, log_fn,
+                              bin_size_nm=qc.render_bin_size_nm, base_nm=_base_nm)
         _render_with_fallback(lc, locs_3sigma, out_dir / "superres_render_clean.png",
-                              f"{entry.name} — 3σ clean", log_fn)
+                              f"{entry.name} — 3σ clean", log_fn,
+                              bin_size_nm=qc.render_bin_size_nm, base_nm=_base_nm)
 
     nnd_mean = float("nan")
     nnd_median = float("nan")
@@ -1289,9 +1367,13 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             nnd_fit = _fit_nnd_peak(distances.values)
             peak_nm = nnd_fit["peak_nm"]
             sigma_nm = nnd_fit["sigma_nm"]
-            if nnd_fit.get("fit_ok") and abs(peak_nm - qc.nnd_target_nm) / max(qc.nnd_target_nm, 1) > 0.20:
+            if nnd_fit.get("fit_ok") and abs(peak_nm - qc.dna_origami_spacing_nm) / max(qc.dna_origami_spacing_nm, 1) > 0.20:
                 log_fn(f"  [INFO] Auto-detected NND peak at {peak_nm:.1f} nm; "
-                       f"consider updating nnd_target_nm (currently {qc.nnd_target_nm:.1f} nm)")
+                       f"consider updating the spacing (currently {qc.dna_origami_spacing_nm:.1f} nm)")
+
+            # Target spacing band, reused below for the subset plot and to set the x-range.
+            lo_nm = qc.dna_origami_spacing_nm - qc.spacing_tol_nm
+            hi_nm = qc.dna_origami_spacing_nm + qc.spacing_tol_nm
 
             fig, ax = plt.subplots(figsize=(8, 5))
             ax.hist(distances, bins=60, color="#26A69A", edgecolor="white",
@@ -1312,6 +1394,15 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             ax.set_ylabel("Density")
             ax.set_title(f"NND — {entry.name}  (n={len(distances):,})", wrap=True)
             ax.legend(fontsize=7, loc="upper right", framealpha=0.85)
+            # Stretch the x-axis to the target window (spacing + tolerance) so the plot is
+            # comparable to the target band; fall back to the 90th percentile when no valid
+            # spacing is set.
+            if np.isfinite(hi_nm) and hi_nm > 0:
+                ax.set_xlim(0, hi_nm)
+            elif len(distances) >= 2:
+                x_hi = float(np.percentile(distances.values, 90))
+                if np.isfinite(x_hi) and x_hi > 0:
+                    ax.set_xlim(0, x_hi)
             fig.tight_layout()
             fig.savefig(out_dir / "nnd_distribution.png", dpi=150)
             plt.close(fig)
@@ -1319,8 +1410,6 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             pd.DataFrame({"distance_nm": distances.values}).to_csv(
                 out_dir / "nnd_distances.csv", index=False)
 
-            lo_nm = qc.nnd_target_nm - qc.nnd_tolerance_nm
-            hi_nm = qc.nnd_target_nm + qc.nnd_tolerance_nm
             mask_target = (distances >= lo_nm) & (distances <= hi_nm)
             distances_target = distances[mask_target]
             nnd_target_count = int(mask_target.sum())
@@ -1336,8 +1425,8 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
                         linewidth=0.3, density=True)
                 ax.axvline(nnd_target_median, color="#EF5350", linewidth=1.5, linestyle="--",
                            label=f"Median  {nnd_target_median:.1f} nm")
-                ax.axvline(qc.nnd_target_nm,  color="#FFFFFF", linewidth=1.0, linestyle=":",
-                           label=f"Target  {qc.nnd_target_nm:.0f} nm")
+                ax.axvline(qc.dna_origami_spacing_nm,  color="#FFFFFF", linewidth=1.0, linestyle=":",
+                           label=f"Spacing  {qc.dna_origami_spacing_nm:.0f} nm")
                 ax.set_xlabel("Nearest-neighbour distance (nm)")
                 ax.set_ylabel("Density")
                 ax.set_title(
@@ -1367,7 +1456,7 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
             ax1.set_title(f"Blinking trace — {entry.name}")
             ax2.plot(frames_arr, mean_intensity_per_frame / 1e3, linewidth=0.8,
                      color="#FFB74D")
-            ax2.set_ylabel("Mean intensity (×10³ photon)")
+            ax2.set_ylabel(f"Mean intensity (×10³ {intensity_unit})")
             ax2.set_xlabel("Frame")
             fig.tight_layout()
             fig.savefig(out_dir / "intensity_vs_time.png", dpi=150)
@@ -1413,7 +1502,7 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
     blinking_spots_found = 0
     if plot_config.blinking_showcase and c.frame_col in df_3sigma.columns and c.x_col in df_3sigma.columns:
         try:
-            all_triplets, detection_msg = _find_all_blinking_triplets(
+            all_structures, detection_msg = _find_all_blinking_structures(
                 df_3sigma, n_spots=qc.n_spots,
                 spacing_nm=qc.dna_origami_spacing_nm,
                 spacing_tol_nm=qc.spacing_tol_nm,
@@ -1421,7 +1510,7 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
                 uncertainty_col=c.uncertainty_col,
                 x_col=c.x_col, y_col=c.y_col,
                 frame_col=c.frame_col, intensity_col=c.intensity_col,
-                max_triplets=qc.max_triplets,
+                max_structures=qc.max_structures,
                 min_blink_cycles=qc.min_blink_cycles,
                 min_blink_frames=qc.min_blink_frames,
                 blink_gap_frames=qc.blink_gap_frames,
@@ -1429,24 +1518,27 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
                 collinear_angle_deg=qc.collinear_angle_deg,
                 log_fn=log_fn,
             )
-            blinking_spots_found = len(all_triplets)
-            if all_triplets:
-                top_triplet = all_triplets[0]
-                blinking_top_score = sum(s["score"] for s in top_triplet)
-                _plot_blinking_showcase(lc, locs_3sigma, top_triplet, df_3sigma,
+            blinking_spots_found = len(all_structures)
+            if all_structures:
+                top_structure = all_structures[0]
+                blinking_top_score = sum(s["score"] for s in top_structure)
+                _base_nm = qc.dna_origami_spacing_nm + qc.spacing_tol_nm
+                _plot_blinking_showcase(lc, locs_3sigma, top_structure, df_3sigma,
                                         out_dir, entry.name,
                                         frame_col=c.frame_col,
                                         intensity_col=c.intensity_col,
-                                        render_bin_size_nm=qc.render_bin_size_nm)
+                                        render_bin_size_nm=qc.render_bin_size_nm,
+                                        base_nm=_base_nm)
                 viewer_html = _write_interactive_viewer(
-                    all_triplets, df_3sigma, out_dir, entry.name,
+                    all_structures, df_3sigma, out_dir, entry.name,
                     frame_col=c.frame_col, intensity_col=c.intensity_col,
                     render_bin_size_nm=qc.render_bin_size_nm,
+                    base_nm=_base_nm,
                     log_fn=log_fn,
                 )
                 stats["viewer_html_path"] = str(viewer_html) if viewer_html else None
                 _save_spot_trace_pngs(
-                    all_triplets, out_dir,
+                    all_structures, out_dir,
                     frame_col=c.frame_col,
                     intensity_col=c.intensity_col,
                     log_fn=log_fn,
@@ -1491,12 +1583,15 @@ def analyze_entry(entry: DatasetEntry, output_dir: Path,
 # ---------------------------------------------------------------------------
 
 def generate_comparison(results: list[AnalysisResult],
-                         output_dir: Path, log_fn: LogFn) -> None:
+                         output_dir: Path, log_fn: LogFn,
+                         assume_photons: bool = False) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not results:
         log_fn("[WARN] No results to compare.")
         return
+
+    intensity_unit = _intensity_unit(assume_photons)
 
     df = pd.DataFrame([
         {
@@ -1528,10 +1623,10 @@ def generate_comparison(results: list[AnalysisResult],
     metrics = [
         ("n_filtered", "Localizations (QC-filtered)", "Localizations per dataset"),
         ("mean_uncertainty", "Mean localization uncertainty (nm)", "Uncertainty per dataset"),
-        ("median_intensity", "Median intensity (photon)", "Intensity per dataset"),
+        ("median_intensity", f"Median intensity ({intensity_unit})", "Intensity per dataset"),
         ("mean_sigma", "Mean PSF sigma (nm)", "PSF Sigma per dataset"),
         ("nnd_mean", "Mean NND (nm)", "Nearest-Neighbour Distance per dataset"),
-        ("n_3sigma", "Locs surviving 3σ photon filter", "3σ Filtered Locs per dataset"),
+        ("n_3sigma", "Locs surviving 3σ intensity filter", "3σ Filtered Locs per dataset"),
         ("nnd_target_mean", "Mean NND target subset (nm)", "NND Target Subset per dataset"),
     ]
 
@@ -1597,7 +1692,7 @@ def generate_comparison(results: list[AnalysisResult],
         ("nnd_distances.csv", "distance_nm", "NND (nm)", "NND distribution per dataset", "nnd_boxplot.png"),
         ("uncertainty_values.csv", "uncertainty_nm", "Localization uncertainty (nm)",
          "Uncertainty distribution per dataset", "uncertainty_boxplot.png"),
-        ("intensity_values.csv", "intensity_ph", "Intensity (photon)",
+        ("intensity_values.csv", "intensity_ph", f"Intensity ({intensity_unit})",
          "Intensity distribution per dataset", "intensity_boxplot.png"),
         ("sigma_values.csv", "sigma_nm", "PSF sigma (nm)",
          "PSF sigma distribution per dataset", "sigma_boxplot.png"),

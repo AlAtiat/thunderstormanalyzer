@@ -32,7 +32,7 @@ public class StatsWriter {
         public double nndSigmaNm;
         public boolean nndFitOk;
         public int nClusters;
-        public int nTriplets;
+        public int nStructures;
         public String protocolSource;
         public String tsVersion;
         public double pixelSizeNm;

@@ -1,9 +1,11 @@
 package com.thunderstorm.analyzer.pipeline;
 
 import com.opencsv.CSVReader;
+import com.opencsv.CSVReaderBuilder;
 import com.thunderstorm.analyzer.model.ColumnConfig;
 import ij.measure.ResultsTable;
 
+import java.io.BufferedReader;
 import java.io.FileReader;
 import java.nio.file.Path;
 import java.util.*;
@@ -51,41 +53,62 @@ public class CsvLoader {
     // Load from CSV file
     // -----------------------------------------------------------------------
     public static LocalizationData loadFromFile(Path csvPath, ColumnConfig col) throws Exception {
-        List<String[]> rows;
-        try (CSVReader reader = new CSVReader(new FileReader(csvPath.toFile()))) {
-            rows = reader.readAll();
+        // Stream the CSV through a 1 MiB BufferedReader and parse row-by-row. opencsv's
+        // CSVReader does NOT buffer on its own, so a bare FileReader reads essentially
+        // char-by-char — pathologically slow on large (millions-of-rows) localization files.
+        // Streaming with readNext() also avoids holding the whole file as a List<String[]>.
+        try (CSVReader reader = new CSVReaderBuilder(
+                new BufferedReader(new FileReader(csvPath.toFile()), 1 << 20)).build()) {
+
+            String[] rawHeaders = reader.readNext();
+            if (rawHeaders == null) throw new IllegalArgumentException("CSV has no data rows.");
+
+            // Build header index (apply ThunderSTORM aliases)
+            Map<String, Integer> idx = buildIndex(rawHeaders);
+
+            int xi   = require(idx, col.xCol,          rawHeaders);
+            int yi   = require(idx, col.yCol,           rawHeaders);
+            int ui   = require(idx, col.uncertaintyCol, rawHeaders);
+            int ii   = require(idx, col.intensityCol,   rawHeaders);
+            int si   = require(idx, col.sigmaCol,       rawHeaders);
+            int fi   = require(idx, col.frameCol,       rawHeaders);
+            int bi   = findBkgstd(idx, col.bkgstdPattern);
+
+            DoubleBuffer xA = new DoubleBuffer(), yA = new DoubleBuffer(),
+                         uA = new DoubleBuffer(), iA = new DoubleBuffer(),
+                         sA = new DoubleBuffer(), fA = new DoubleBuffer(),
+                         bA = new DoubleBuffer();
+
+            String[] row;
+            while ((row = reader.readNext()) != null) {
+                xA.add(parseD(row, xi));
+                yA.add(parseD(row, yi));
+                uA.add(parseD(row, ui));
+                iA.add(parseD(row, ii));
+                sA.add(parseD(row, si));
+                fA.add(parseD(row, fi));
+                bA.add(bi >= 0 ? parseD(row, bi) : 0.0);
+            }
+            if (xA.size == 0) throw new IllegalArgumentException("CSV has no data rows.");
+
+            return new LocalizationData(xA.trimmed(), yA.trimmed(), uA.trimmed(),
+                                        iA.trimmed(), sA.trimmed(), fA.trimmed(), bA.trimmed());
         }
-        if (rows.size() < 2) throw new IllegalArgumentException("CSV has no data rows.");
+    }
 
-        // Build header index (apply ThunderSTORM aliases)
-        String[] rawHeaders = rows.get(0);
-        Map<String, Integer> idx = buildIndex(rawHeaders);
+    /** Growable primitive double array — avoids Double boxing while streaming the CSV. */
+    private static final class DoubleBuffer {
+        private double[] data = new double[1 << 16];
+        private int size = 0;
 
-        int xi   = require(idx, col.xCol,          rawHeaders);
-        int yi   = require(idx, col.yCol,           rawHeaders);
-        int ui   = require(idx, col.uncertaintyCol, rawHeaders);
-        int ii   = require(idx, col.intensityCol,   rawHeaders);
-        int si   = require(idx, col.sigmaCol,       rawHeaders);
-        int fi   = require(idx, col.frameCol,       rawHeaders);
-        int bi   = findBkgstd(idx, col.bkgstdPattern);
-
-        int nRows = rows.size() - 1;
-        double[] xA = new double[nRows], yA = new double[nRows],
-                 uA = new double[nRows], iA = new double[nRows],
-                 sA = new double[nRows], fA = new double[nRows],
-                 bA = new double[nRows];
-
-        for (int r = 0; r < nRows; r++) {
-            String[] row = rows.get(r + 1);
-            xA[r] = parseD(row, xi);
-            yA[r] = parseD(row, yi);
-            uA[r] = parseD(row, ui);
-            iA[r] = parseD(row, ii);
-            sA[r] = parseD(row, si);
-            fA[r] = parseD(row, fi);
-            bA[r] = bi >= 0 ? parseD(row, bi) : 0.0;
+        void add(double v) {
+            if (size == data.length) data = Arrays.copyOf(data, data.length << 1);
+            data[size++] = v;
         }
-        return new LocalizationData(xA, yA, uA, iA, sA, fA, bA);
+
+        double[] trimmed() {
+            return Arrays.copyOf(data, size);
+        }
     }
 
     // -----------------------------------------------------------------------

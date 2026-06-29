@@ -59,11 +59,24 @@ public class AnalyzerFrame extends JFrame {
 
     public AnalyzerFrame() {
         super("ThunderSTORM Analyzer");
+        applyFijiIcon();
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
         setPreferredSize(new Dimension(1200, 760));
         buildUI();
         pack();
         setLocationRelativeTo(null);
+    }
+
+    /** Reuse the running Fiji/ImageJ window icon so the Analyzer matches the host app. */
+    private void applyFijiIcon() {
+        try {
+            ij.ImageJ imagej = ij.IJ.getInstance();
+            if (imagej != null && imagej.getIconImage() != null) {
+                setIconImage(imagej.getIconImage());
+            }
+        } catch (Throwable ignored) {
+            // No running ImageJ (standalone dev run) or headless — keep the default icon.
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -317,10 +330,12 @@ public class AnalyzerFrame extends JFrame {
             e.qc.minBlinkFrames    = configPanel.getMinFrames();
             e.qc.blinkGapFrames    = configPanel.getBlinkGap();
             e.qc.dbscanMinSamples  = configPanel.getMinLocs();
-            e.qc.renderBinSizeNm   = configPanel.getBinSize();
+            // renderBinSizeNm is derived per dataset in DatasetPanel.toEntry (from the
+            // dataset's Visualization magnification), so it is not set here.
             e.qc.collinearAngleDeg = configPanel.getAngle();
             e.qc.nSpots            = configPanel.getNSpots();
-            e.qc.maxTriplets       = configPanel.getMaxTriplets();
+            e.qc.maxStructures     = configPanel.getMaxStructures();
+            e.qc.assumePhotons     = configPanel.isRealCalibration();
             entries.add(e);
         }
 

@@ -35,7 +35,7 @@ public class ResultsLoader {
         public double  nndPeakNm         = 0;
         public double  nndSigmaNm        = 0;
         public int     nClusters         = 0;
-        public int     nTriplets         = 0;
+        public int     nStructures       = 0;
 
         // Directory where all outputs live
         public Path    outputDir     = null;
@@ -73,7 +73,7 @@ public class ResultsLoader {
             r.nndPeakNm          = getDouble(json, "nndPeakNm");
             r.nndSigmaNm         = getDouble(json, "nndSigmaNm");
             r.nClusters          = getInt(json, "nClusters");
-            r.nTriplets          = getInt(json, "nTriplets");
+            r.nStructures        = getInt(json, "nStructures");
         } catch (Exception ex) {
             r.error = "Failed to parse stats.json: " + ex.getMessage();
             return r;
@@ -91,7 +91,7 @@ public class ResultsLoader {
         r.stats.put("Mean intensity",      String.format("%.0f", r.meanIntensity));
         r.stats.put("NND peak (nm)",       String.format("%.1f", r.nndPeakNm));
         r.stats.put("Clusters found",      String.valueOf(r.nClusters));
-        r.stats.put("Triplets found",      String.valueOf(r.nTriplets));
+        r.stats.put("Structures found",    String.valueOf(r.nStructures));
 
         // Build plot paths (file names match what AnalysisPipeline writes)
         addPlot(r, dir, "SR Image",           "sr_image.png");

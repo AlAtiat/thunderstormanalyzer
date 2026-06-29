@@ -62,7 +62,9 @@ class AnalysisRunner:
             if results and plot_config.comparison_plots:
                 try:
                     on_log("[INFO] Generating comparison plots…")
-                    generate_comparison(results, output_dir / "comparison", on_log)
+                    assume_photons = bool(datasets[0].qc.assume_photons) if datasets else False
+                    generate_comparison(results, output_dir / "comparison", on_log,
+                                        assume_photons=assume_photons)
                 except Exception:
                     on_log(f"[ERR] Comparison plots failed:\n{traceback.format_exc()}")
 

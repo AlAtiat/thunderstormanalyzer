@@ -1,5 +1,27 @@
 # ThunderSTORMAnalyzer Release Notes
 
+## 0.0.4 (29 Jun 2026)
+
+Detection & analysis (app + Fiji plugin)
+
+* Generalised DNA-origami detection from fixed triplets to arbitrary N-spot collinear structures; "triplet" renamed to "structure" throughout.
+* Merged the separate spacing and NND-target inputs into one "Spacing / NND" value (+ tolerance); the NND-target band is derived from it.
+* Optics reworked into clearly labelled Camera pixel size + Objective magnification + Visualization magnification. Effective pixel = camera ÷ objective; the SR render bin is auto-derived (= effective ÷ visualization), shown live and overridable per dataset — the bin label now also reflects a manual edit.
+* NND distribution plot x-axis now stretches to the target spacing ± tolerance.
+* Scale bars on the super-resolution, structure-zoom and carousel images are anchored to spacing + tolerance (a clean round multiple on large fields), with correct nm/µm units.
+* New "Real calibration" toggle (default off): intensity is labelled "a.u." unless enabled, then "photon" (echoing the protocol's offset / photons2ADU / EM-gain, with an inconsistency warning). Values are never recomputed — labelling only.
+
+Desktop app
+
+* Faster CSV browsing (header-only read).
+* Per-dataset QC auto-fill: max sigma / max uncertainty from the data's 95th percentile.
+* The dataset list no longer jumps to the top while editing a field.
+
+Fiji plugin (1.0.2)
+
+* Window now uses the Fiji/ImageJ logo.
+* Much faster CSV loading (buffered streaming read) — fixes the apparent hang on large files.
+
 ## 0.0.3 (23 Jun 2026)
 
 * matplotlib>=3.8,<3.11

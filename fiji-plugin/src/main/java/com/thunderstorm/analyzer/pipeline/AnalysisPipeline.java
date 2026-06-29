@@ -24,7 +24,7 @@ public class AnalysisPipeline {
         public NndAnalyzer.NndResult nnd;
         public DbscanClusterer.ClusterResult clusters;
         public BlinkingScorer.ClusterScore[] clusterScores;
-        public List<TripletDetector.Triplet> triplets;
+        public List<StructureDetector.Structure> structures;
         public Path outputDir;
         public StatsWriter.StatsJson stats;
         public String errorMessage;   // non-null if pipeline failed
@@ -69,6 +69,9 @@ public class AnalysisPipeline {
                 return result;
             }
 
+            // Intensity unit label — "photon" only when the user confirmed a real calibration.
+            String intensityUnit = QcParams.intensityUnit(qc.assumePhotons);
+
             // Histograms
             if (plot.histograms) {
                 log.accept("  Writing histograms...");
@@ -76,10 +79,11 @@ public class AnalysisPipeline {
                     outDir.resolve("hist_uncertainty.png"));
                 PlotWriter.writeHistogram(fd.sigma, "Sigma (nm)", "PSF Sigma Distribution", 60,
                     outDir.resolve("hist_sigma.png"));
-                PlotWriter.writeHistogram(fd.intensity, "Intensity (photons)", "Intensity Distribution", 60,
-                    outDir.resolve("hist_intensity.png"));
+                PlotWriter.writeHistogram(fd.intensity, "Intensity (" + intensityUnit + ")",
+                    "Intensity Distribution", 60, outDir.resolve("hist_intensity.png"));
                 PlotWriter.writeLocsPerFrame(fd.frame, outDir.resolve("locs_per_frame.png"));
-                PlotWriter.writeIntensityVsTime(fd.frame, fd.intensity, outDir.resolve("intensity_vs_time.png"));
+                PlotWriter.writeIntensityVsTime(fd.frame, fd.intensity, intensityUnit,
+                    outDir.resolve("intensity_vs_time.png"));
             }
 
             // NND analysis
@@ -90,7 +94,8 @@ public class AnalysisPipeline {
                 log.accept(String.format("  NND peak=%.1f nm  σ=%.1f nm  fitOk=%b",
                     nnd.peakNm, nnd.sigmaNm, nnd.fitOk));
                 PlotWriter.writeNndPlot(nnd.kdeX, nnd.kdeY, nnd.fitX, nnd.fitY,
-                    nnd.peakNm, outDir.resolve("nnd_plot.png"));
+                    nnd.peakNm, qc.dnaOrigamiSpacingNm, qc.spacingTolNm,
+                    outDir.resolve("nnd_plot.png"));
             }
 
             // SR rendering — always render to memory; save to disk if toggle on
@@ -98,11 +103,12 @@ public class AnalysisPipeline {
             java.awt.image.BufferedImage srImage = null;
             if (plot.superresRender || plot.blinkingShowcase) {
                 log.accept("  Rendering SR image...");
-                srImage = SrRenderer.render(fd.x, fd.y, binNm,
+                double scaleBarBaseNm = qc.dnaOrigamiSpacingNm + qc.spacingTolNm;
+                srImage = SrRenderer.render(fd.x, fd.y, binNm, scaleBarBaseNm,
                     plot.superresRender ? outDir.resolve("sr_image.png") : null);
             }
 
-            // DBSCAN + blinking scoring + triplet detection
+            // DBSCAN + blinking scoring + structure detection
             if (plot.blinkingShowcase) {
                 log.accept("  Running DBSCAN clustering...");
                 double nndPeak = result.nnd != null ? result.nnd.peakNm : 0;
@@ -122,25 +128,25 @@ public class AnalysisPipeline {
                     result.clusterScores = scores;
 
                     log.accept("  Finding structures (nSpots=" + nSpots + ")...");
-                    List<TripletDetector.Triplet> triplets = TripletDetector.find(
+                    List<StructureDetector.Structure> structures = StructureDetector.find(
                         fd.x, fd.y, clr.labels, scores,
                         qc.dnaOrigamiSpacingNm, qc.spacingTolNm,
-                        qc.collinearAngleDeg, qc.maxTriplets, nSpots);
-                    result.triplets = triplets;
-                    log.accept("  Structures found (" + nSpots + " dots): " + triplets.size());
+                        qc.collinearAngleDeg, qc.maxStructures, nSpots);
+                    result.structures = structures;
+                    log.accept("  Structures found (" + nSpots + " dots): " + structures.size());
 
-                    if (!triplets.isEmpty() && srImage != null) {
-                        // Blinking showcase: 3-panel Python-style figure for the top triplet
+                    if (!structures.isEmpty() && srImage != null) {
+                        // Blinking showcase: 3-panel Python-style figure for the top structure
                         PlotWriter.writeBlinkingShowcase(
                             srImage, fd.x, fd.y,
-                            triplets.get(0),
+                            structures.get(0),
                             fd.frame, fd.intensity, clr.labels,
-                            binNm, entry.name,
+                            binNm, qc.dnaOrigamiSpacingNm, qc.spacingTolNm, entry.name,
                             outDir.resolve("blinking_showcase.png"));
 
-                        // HTML carousel for all found triplets
-                        HtmlCarousel.write(triplets, fd.x, fd.y, fd.frame, fd.intensity,
-                            clr.labels, srImage, binNm, outDir);
+                        // HTML carousel for all found structures
+                        HtmlCarousel.write(structures, fd.x, fd.y, fd.frame, fd.intensity,
+                            clr.labels, srImage, binNm, qc.dnaOrigamiSpacingNm, qc.spacingTolNm, outDir);
                     }
                 }
             }
@@ -193,7 +199,7 @@ public class AnalysisPipeline {
             s.nndFitOk   = result.nnd.fitOk;
         }
         if (result.clusters != null)  s.nClusters  = result.clusters.nClusters;
-        if (result.triplets != null)  s.nTriplets  = result.triplets.size();
+        if (result.structures != null)  s.nStructures  = result.structures.size();
         if (proto != null) {
             s.protocolSource = proto.sourceImage;
             s.tsVersion      = proto.tsVersion;

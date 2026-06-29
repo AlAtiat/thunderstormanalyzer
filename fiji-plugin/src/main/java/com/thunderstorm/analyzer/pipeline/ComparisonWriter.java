@@ -43,8 +43,10 @@ public class ComparisonWriter {
     public static void write(List<AnalysisPipeline.AnalysisResult> results,
                              List<String> names,
                              Path outputDir,
+                             boolean assumePhotons,
                              Consumer<String> log) throws IOException {
         log.accept("  Writing comparison charts...");
+        String intensityUnit = com.thunderstorm.analyzer.model.QcParams.intensityUnit(assumePhotons);
 
         writeBarChart(results, names, outputDir.resolve("nnd_boxplot.png"),
             "NND Peak per Dataset", "NND Peak (nm)",
@@ -59,7 +61,7 @@ public class ComparisonWriter {
             r -> r.stats != null ? r.stats.meanSigmaNm : Double.NaN);
 
         writeBarChart(results, names, outputDir.resolve("intensity_boxplot.png"),
-            "Mean Intensity", "Mean Intensity (photons)",
+            "Mean Intensity", "Mean Intensity (" + intensityUnit + ")",
             r -> r.stats != null ? r.stats.meanIntensity : Double.NaN);
 
         writeLocsOverlay(results, names, outputDir.resolve("locs_per_frame_overlay.png"), log);

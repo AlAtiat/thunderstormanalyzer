@@ -81,7 +81,8 @@ public class AnalysisRunner extends SwingWorker<List<DatasetResult>, String> {
             try {
                 Path cmpDir = outputDir.resolve("comparison");
                 Files.createDirectories(cmpDir);
-                ComparisonWriter.write(rawResults, names, cmpDir, this::publish);
+                boolean assumePhotons = !datasets.isEmpty() && datasets.get(0).qc.assumePhotons;
+                ComparisonWriter.write(rawResults, names, cmpDir, assumePhotons, this::publish);
             } catch (Exception ex) {
                 publish("  Comparison plots failed: " + ex.getMessage());
             }

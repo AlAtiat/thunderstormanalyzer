@@ -44,7 +44,10 @@ public class NndAnalyzer {
         double bandwidth = 0.9 * std * Math.pow(n, -0.2);
         if (bandwidth < 1e-9) bandwidth = 1.0;
 
-        double minD = min(nnd), maxD = Math.min(max(nnd), 600.0);
+        // Cap the KDE grid (and therefore the plot's x-axis) at the 90th percentile so
+        // the long tail does not squeeze the peak; keep 600 nm as an absolute ceiling.
+        double minD = min(nnd), maxD = Math.min(percentile(nnd, 90.0), 600.0);
+        if (maxD <= minD) maxD = Math.min(max(nnd), 600.0);  // degenerate-data guard
         int kdePoints = 600;
         double[] kdeX = linspace(minD, maxD, kdePoints);
         double[] kdeY = kde(nnd, kdeX, bandwidth);
@@ -300,6 +303,20 @@ public class NndAnalyzer {
 
     private static double min(double[] a) { double m = a[0]; for (double v : a) if (v < m) m = v; return m; }
     private static double max(double[] a) { double m = a[0]; for (double v : a) if (v > m) m = v; return m; }
+
+    /** Linear-interpolated percentile (p in 0..100), matching numpy's default method. */
+    private static double percentile(double[] a, double p) {
+        if (a.length == 0) return 0.0;
+        if (a.length == 1) return a[0];
+        double[] sorted = a.clone();
+        Arrays.sort(sorted);
+        double rank = (p / 100.0) * (sorted.length - 1);
+        int lo = (int) Math.floor(rank);
+        int hi = (int) Math.ceil(rank);
+        if (lo == hi) return sorted[lo];
+        double frac = rank - lo;
+        return sorted[lo] + frac * (sorted[hi] - sorted[lo]);
+    }
 
     /** Range query: returns indices of all points within radius r of (qx, qy). */
     public static int[] rangeQuery(double[] x, double[] y, double qx, double qy, double r, KDNode root) {

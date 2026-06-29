@@ -83,7 +83,8 @@ public class PlotWriter {
 
     public static void writeNndPlot(double[] kdeX, double[] kdeY,
                                     double[] fitX, double[] fitY,
-                                    double peakNm, Path out) throws IOException {
+                                    double peakNm, double spacingNm, double spacingTolNm,
+                                    Path out) throws IOException {
         XYSeriesCollection ds = new XYSeriesCollection();
         XYSeries kde = new XYSeries("KDE");
         for (int i = 0; i < kdeX.length; i++) kde.add(kdeX[i], kdeY[i]);
@@ -111,8 +112,19 @@ public class PlotWriter {
         }
         // Suppress trailing zeros on nm axes (e.g. "80" not "80.0")
         DecimalFormat nmFmt = new DecimalFormat("0.#");
-        ((NumberAxis) plot.getDomainAxis()).setNumberFormatOverride(nmFmt);
+        NumberAxis domainAxis = (NumberAxis) plot.getDomainAxis();
+        domainAxis.setNumberFormatOverride(nmFmt);
         ((NumberAxis) plot.getRangeAxis()).setNumberFormatOverride(new DecimalFormat("0.###"));
+
+        // Stretch the x-axis to the target window (spacing + tolerance) so the plot is
+        // comparable to the target band. No markers/labels; when no valid spacing is set,
+        // leave the default auto-range (KDE grid, already capped at P90 in NndAnalyzer).
+        if (Double.isFinite(spacingNm) && spacingNm > 0) {
+            double hi = spacingNm + (spacingTolNm > 0 ? spacingTolNm : 0);
+            domainAxis.setAutoRange(false);
+            domainAxis.setRange(0.0, hi);
+        }
+
         styleChartFonts(chart);
         save(chart, out);
     }
@@ -150,7 +162,7 @@ public class PlotWriter {
     // -------------------------------------------------------------------
 
     public static void writeIntensityVsTime(double[] frames, double[] intensity,
-                                            Path out) throws IOException {
+                                            String intensityUnit, Path out) throws IOException {
         if (frames.length == 0) return;
         int maxFrame = 0;
         for (double f : frames) if ((int)f > maxFrame) maxFrame = (int)f;
@@ -166,7 +178,7 @@ public class PlotWriter {
         XYSeriesCollection ds = new XYSeriesCollection(series);
 
         JFreeChart chart = ChartFactory.createXYLineChart(
-            "Mean Intensity per Frame", "Frame", "Intensity (photons)",
+            "Mean Intensity per Frame", "Frame", "Intensity (" + intensityUnit + ")",
             ds, PlotOrientation.VERTICAL, false, false, false);
         styleLineChart(chart, STEEL_BLUE);
         XYPlot plot = chart.getXYPlot();
@@ -214,7 +226,7 @@ public class PlotWriter {
      * @param srFull      Full SR BufferedImage (already rendered at binSizeNm)
      * @param allX        All x coords used for SR (nm)
      * @param allY        All y coords
-     * @param triplet     The top triplet
+     * @param structure     The top structure
      * @param allFrames   frame array of ALL localisations
      * @param binSizeNm   bin size used for the SR render
      * @param datasetName dataset label for title
@@ -223,10 +235,11 @@ public class PlotWriter {
     public static void writeBlinkingShowcase(
             BufferedImage srFull,
             double[] allX, double[] allY,
-            TripletDetector.Triplet triplet,
+            StructureDetector.Structure structure,
             double[] allFrames, double[] allIntensity,
             int[] clusterLabels,
             double binSizeNm,
+            double spacingNm, double spacingTolNm,
             String datasetName,
             Path out) throws IOException {
 
@@ -258,12 +271,12 @@ public class PlotWriter {
         double scaleX = mainW / (maxX - minX);
         double scaleY = srH   / (maxY - minY);
 
-        // Larger pad gives context around the triplet so it appears centred, not filling the panel
+        // Larger pad gives context around the structure so it appears centred, not filling the panel
         double padNm = 400.0;
-        double bx0 = arrMin(triplet.centreX) - padNm;
-        double bx1 = arrMax(triplet.centreX) + padNm;
-        double by0 = arrMin(triplet.centreY) - padNm;
-        double by1 = arrMax(triplet.centreY) + padNm;
+        double bx0 = arrMin(structure.centreX) - padNm;
+        double bx1 = arrMax(structure.centreX) + padNm;
+        double by0 = arrMin(structure.centreY) - padNm;
+        double by1 = arrMax(structure.centreY) + padNm;
 
         int rx0 = clamp((int)((bx0 - minX) * scaleX), 0, mainW - 1);
         int ry0 = clamp((int)((by0 - minY) * scaleY), 0, srH   - 1);
@@ -278,7 +291,7 @@ public class PlotWriter {
         // Title: fontsize ~20 pt at 200 dpi ≈ 40 px; white
         g.setColor(Color.WHITE);
         g.setFont(new Font("SansSerif", Font.BOLD, 40));
-        g.drawString(datasetName + " — DNA origami triplet", 24, 52);
+        g.drawString(datasetName + " — DNA origami structure", 24, 52);
 
         // --- Panel 2: Zoomed SR patch (top-right), inset with margin so connectors
         //     visibly travel to the patch corners rather than the full-panel edges ---
@@ -348,10 +361,10 @@ public class PlotWriter {
 
         // Spot circles: r=30 nm → pixels; linewidth=2.0; alpha=0.9
         g.setStroke(new BasicStroke(2.0f));
-        int nSpotsDraw = Math.min(triplet.centreX.length, SPOT_COLORS.length);
+        int nSpotsDraw = Math.min(structure.centreX.length, SPOT_COLORS.length);
         for (int k = 0; k < nSpotsDraw; k++) {
-            double cx = triplet.centreX[k];
-            double cy = triplet.centreY[k];
+            double cx = structure.centreX[k];
+            double cy = structure.centreY[k];
             int px = zoomImgX + (int)((cx - bx0) * zoomScaleX);
             int py = zoomImgY + (int)((cy - by0) * zoomScaleY);
             double rNm = 30.0;
@@ -364,19 +377,22 @@ public class PlotWriter {
             g.setComposite(origComp);
         }
 
-        // Scale bar positioned in lower-left of zoom image
+        // Scale bar positioned in lower-left of zoom image, anchored to the structure
+        // scale (spacing + tolerance); falls back to 100 nm when no spacing is set.
+        double barLenNm = SrRenderer.niceScaleBarNm(bx1 - bx0, spacingNm + spacingTolNm);
+        if (barLenNm <= 0) barLenNm = 100.0;
         double barXnm = bx0 + padNm * 0.15;
         double barYnm = by1 - padNm * 0.25;
         int barX  = zoomImgX + (int)((barXnm - bx0) * zoomScaleX);
         int barY  = zoomImgY + (int)((barYnm - by0) * zoomScaleY);
-        int barPx = (int)(100.0 * zoomScaleX);
+        int barPx = (int)(barLenNm * zoomScaleX);
         g.setColor(Color.WHITE);
         g.setStroke(new BasicStroke(2.5f));
         g.drawLine(barX, barY, barX + barPx, barY);
         int labelFontSz = 28;
         g.setFont(new Font("SansSerif", Font.PLAIN, labelFontSz));
         FontMetrics fm = g.getFontMetrics();
-        String barLabel = "100 nm";
+        String barLabel = SrRenderer.scaleBarLabel(barLenNm);
         int labelW = fm.stringWidth(barLabel);
         g.drawString(barLabel, barX + barPx / 2 - labelW / 2, barY - 6);
 
@@ -385,7 +401,7 @@ public class PlotWriter {
         g.drawString("Magnified", zoomImgX + 20, zoomImgY + 46);
 
         // --- Panel 3: Stacked blinking traces (bottom, full width) ---
-        drawStackedTraces(g, triplet, allFrames, allIntensity, clusterLabels,
+        drawStackedTraces(g, structure, allFrames, allIntensity, clusterLabels,
             0, srH, W, traceH);
 
         g.dispose();
@@ -393,7 +409,7 @@ public class PlotWriter {
     }
 
     private static void drawStackedTraces(Graphics2D g,
-                                          TripletDetector.Triplet triplet,
+                                          StructureDetector.Structure structure,
                                           double[] allFrames, double[] allIntensity,
                                           int[] clusterLabels,
                                           int x, int y, int w, int h) {
@@ -405,7 +421,7 @@ public class PlotWriter {
         int frameMax = (int) arrMax(allFrames);
         int nFrames  = frameMax - frameMin + 1;
 
-        int nDots = triplet.clusterIds.length;
+        int nDots = structure.clusterIds.length;
 
         // Build per-spot mean intensity per frame
         double[][] traces = new double[nDots][nFrames];
@@ -413,7 +429,7 @@ public class PlotWriter {
         int[]      nCycles = new int[nDots];
 
         for (int k = 0; k < nDots; k++) {
-            int[] members = DbscanClusterer.clusterMembers(clusterLabels, triplet.clusterIds[k]);
+            int[] members = DbscanClusterer.clusterMembers(clusterLabels, structure.clusterIds[k]);
             for (int m : members) {
                 int fi = (int) allFrames[m] - frameMin;
                 if (fi >= 0 && fi < nFrames) {
@@ -423,7 +439,7 @@ public class PlotWriter {
             }
             for (int f = 0; f < nFrames; f++)
                 if (counts[k][f] > 0) traces[k][f] /= counts[k][f];
-            nCycles[k] = triplet.clusterScores[k].nCycles;
+            nCycles[k] = structure.clusterScores[k].nCycles;
         }
 
         // Font sizes scaled for 3200×2400 canvas (≈200 DPI)
