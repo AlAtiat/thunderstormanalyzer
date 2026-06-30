@@ -15,6 +15,74 @@ Overview
 
 **Analysis workflow of ThunderSTORM Origami Analyzer.** Raw localization tables exported from ThunderSTORM are passed through a sequential quality-control pipeline. The filtered data feed a super-resolution rendering engine and a nearest-neighbour distance analyser in parallel. Concurrently, DBSCAN clustering groups repeat localizations per emitter; blinking quality scores are computed and used to detect collinear DNA origami triplets. All outputs are written to the user-specified results directory.
 
+How to Download
+===============
+
+Windows
+-------
+
+Download the Windows installer:
+
+- `ThunderSTORMAnalyzer.msi <https://github.com/AlAtiat/thunderstormanalyzer/releases/latest/download/ThunderSTORMAnalyzer.msi>`__
+
+This installer is for Windows 10 and Windows 11. After downloading it, run the installer and follow the setup steps.
+
+macOS
+-----
+
+Choose the correct DMG file for your Mac:
+
+- `ThunderSTORMAnalyzer for Apple Silicon <https://github.com/AlAtiat/thunderstormanalyzer/releases/latest/download/ThunderSTORMAnalyzer-arm64.dmg>`__
+
+- `ThunderSTORMAnalyzer for Intel Macs <https://github.com/AlAtiat/thunderstormanalyzer/releases/latest/download/ThunderSTORMAnalyzer-x86_64.dmg>`__
+
+Use the Apple Silicon version for Macs with M1, M2, or M3 chips. Use the Intel version for older Intel-based Macs.
+
+After downloading the DMG file, open it and drag the application into the Applications folder.
+
+Linux AppImage
+--------------
+
+Download the Linux AppImage:
+
+- `ThunderSTORMAnalyzer.AppImage <https://github.com/AlAtiat/thunderstormanalyzer/releases/latest/download/ThunderSTORMAnalyzer.AppImage>`__
+
+The AppImage works on most Linux distributions and does not need installation.
+
+After downloading it, run:
+
+::
+
+   chmod +x ThunderSTORMAnalyzer.AppImage
+   ./ThunderSTORMAnalyzer.AppImage
+
+Linux Flatpak
+-------------
+
+Download the Flatpak package:
+
+- `ThunderSTORMAnalyzer.flatpak <https://github.com/AlAtiat/thunderstormanalyzer/releases/latest/download/ThunderSTORMAnalyzer.flatpak>`__
+
+Install it with:
+
+::
+
+   flatpak install ThunderSTORMAnalyzer.flatpak
+
+ImageJ / Fiji Plugin
+--------------------
+
+Download the ImageJ / Fiji plugin:
+
+- `ThunderSTORMAnalyzer-Fiji-plugin.jar <https://github.com/AlAtiat/thunderstormanalyzer/releases/latest/download/ThunderSTORMAnalyzer-Fiji-plugin.jar>`__
+
+Releases
+--------
+
+The links above always point to the latest release.
+
+All releases and release notes are available on the `GitHub Releases page <https://github.com/AlAtiat/thunderstormanalyzer/releases>`__.
+
 How to Use
 ==========
 
